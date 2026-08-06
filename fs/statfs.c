@@ -188,7 +188,7 @@ SYSCALL_DEFINE2(statfs, const char __user *, pathname, struct statfs __user *, b
 	struct kstatfs st;
 	int error = user_statfs(pathname, &st);
 	if (!error)
-		error = do_statfs_native(&st, buf);
+		error = do_statfsnative(&st, buf);
 	return error;
 }
 
@@ -209,7 +209,7 @@ SYSCALL_DEFINE2(fstatfs, unsigned int, fd, struct statfs __user *, buf)
 	struct kstatfs st;
 	int error = fd_statfs(fd, &st);
 	if (!error)
-		error = do_statfs_native(&st, buf);
+		error = do_statfsnative(&st, buf);
 	return error;
 }
 
