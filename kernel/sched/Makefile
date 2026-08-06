@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: GPL-2.0
 ifdef CONFIG_FUNCTION_TRACER
+obj-$(CONFIG_SCHED_HYDRA) += hydra.o
 CFLAGS_REMOVE_clock.o = $(CC_FLAGS_FTRACE)
 endif
 

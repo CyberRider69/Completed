@@ -2307,7 +2307,15 @@ config LIMITLESS
 	help
 	  This option enables ThRE Team's Limitless Addon
 	  for dynamic kernel parameters.
-	  
+
+config SCHED_HYDRA
+	bool "High-Yield Dynamic Render Affinity (HYDRA)"
+	default n
+	help
+	  HYDRA optimizes game rendering threads by applying nice boosts and
+	  big-core affinity. It is activated on-demand via sysctl and operates
+	  entirely isolated from the core scheduler.
+
 source "kernel/Kconfig.locks"
 
 config ARCH_HAS_NON_OVERLAPPING_ADDRESS_SPACE
