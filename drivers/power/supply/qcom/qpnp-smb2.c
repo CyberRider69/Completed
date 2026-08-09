@@ -20,6 +20,7 @@
 #include "smb-lib.h"
 #include "storm-watch.h"
 #include <linux/pmic-voter.h>
+#include <linux/kobject.h>
 
 #ifdef CONFIG_LIMITLESS
   #define USBIN_2500MA    2500000
@@ -3022,6 +3023,106 @@ static void smb2_create_debugfs(struct smb2 *chip)
 #endif
 
 #include <linux/kobject.h>
+#include <linux/mutex.h>
+
+/* --- Bypass Charge Global State & Thread Safety --- */
+static struct smb_charger *bypass_chg;
+static struct kobject *bypass_kobj;
+static DEFINE_MUTEX(bypass_lock);
+static bool bypass_active = false;
+
+#ifndef BYPASS_CHARGE_VOTER
+#define BYPASS_CHARGE_VOTER "BYPASS_CHARGE_VOTER"
+#endif
+
+static inline bool is_bypass_active(void)
+{
+	return bypass_active;
+}
+
+static inline void bypass_charge_set_active(bool enable)
+{
+	bypass_active = enable;
+}
+
+/* --- Sysfs Callbacks --- */
+static ssize_t bypass_charging_show(struct kobject *kobj,
+				    struct kobj_attribute *attr, char *buf)
+{
+	return sprintf(buf, "%d\n", is_bypass_active() ? 1 : 0);
+}
+
+static ssize_t bypass_charging_store(struct kobject *kobj,
+				     struct kobj_attribute *attr,
+				     const char *buf, size_t count)
+{
+	int val;
+
+	if (sscanf(buf, "%d", &val) != 1)
+		return -EINVAL;
+
+	mutex_lock(&bypass_lock);
+	if (bypass_chg && bypass_chg->chg_disable_votable) {
+		bool enable = !!val;
+		vote(bypass_chg->chg_disable_votable,
+		     BYPASS_CHARGE_VOTER, enable, 0);
+		bypass_charge_set_active(enable);
+	}
+	mutex_unlock(&bypass_lock);
+
+	return count;
+}
+
+static struct kobj_attribute bypass_charging_attr =
+	__ATTR(bypass_charging, 0644, bypass_charging_show, bypass_charging_store);
+
+static struct attribute *bypass_charge_attrs[] = {
+	&bypass_charging_attr.attr,
+	NULL,
+};
+
+static struct attribute_group bypass_charge_attr_group = {
+	.attrs = bypass_charge_attrs,
+};
+
+static void bypass_charge_sysfs_init(struct smb_charger *chg)
+{
+	int rc;
+
+	if (!chg->chg_disable_votable) {
+		pr_err("bypass_charge: chg_disable_votable not ready\n");
+		return;
+	}
+
+	mutex_lock(&bypass_lock);
+	bypass_chg = chg;
+	bypass_kobj = kobject_create_and_add("bypass_charge", kernel_kobj);
+	if (!bypass_kobj) {
+		bypass_chg = NULL;
+		mutex_unlock(&bypass_lock);
+		return;
+	}
+
+	rc = sysfs_create_group(bypass_kobj, &bypass_charge_attr_group);
+	if (rc) {
+		kobject_put(bypass_kobj);
+		bypass_kobj = NULL;
+		bypass_chg = NULL;
+	}
+	mutex_unlock(&bypass_lock);
+}
+
+static void bypass_charge_sysfs_exit(void)
+{
+	mutex_lock(&bypass_lock);
+	if (bypass_kobj) {
+		sysfs_remove_group(bypass_kobj, &bypass_charge_attr_group);
+		kobject_put(bypass_kobj);
+		bypass_kobj = NULL;
+	}
+	bypass_chg = NULL;
+	mutex_unlock(&bypass_lock);
+}
 
 static struct smb_charger *global_smb_chg = NULL;
 static int bypass_charging_val = 0;
@@ -3043,7 +3144,7 @@ static ssize_t bypass_charging_store(struct kobject *kobj, struct kobj_attribute
 	return count;
 }
 
-static struct kobj_attribute bypass_charging_attr = __ATTR(bypass_charging, 0664, bypass_charging_show, bypass_charging_store);
+static struct kobj_attribute bypass_charging_attr = __ATTR(bypass_charging, 0644, bypass_charging_show, bypass_charging_store);
 
 static struct attribute *bypass_charge_attrs[] = {
 	&bypass_charging_attr.attr,
@@ -3124,15 +3225,13 @@ static int smb2_probe(struct platform_device *pdev)
 
 	rc = smb2_init_vbus_regulator(chip);
 	if (rc < 0) {
-		pr_err("Couldn't initialize vbus regulator rc=%d\n",
-			rc);
+		pr_err("Couldn't initialize vbus regulator rc=%d\n", rc);
 		goto cleanup;
 	}
 
 	rc = smb2_init_vconn_regulator(chip);
 	if (rc < 0) {
-		pr_err("Couldn't initialize vconn regulator rc=%d\n",
-				rc);
+		pr_err("Couldn't initialize vconn regulator rc=%d\n", rc);
 		goto cleanup;
 	}
 
@@ -3140,15 +3239,13 @@ static int smb2_probe(struct platform_device *pdev)
 	chg->extcon = devm_extcon_dev_allocate(chg->dev, smblib_extcon_cable);
 	if (IS_ERR(chg->extcon)) {
 		rc = PTR_ERR(chg->extcon);
-		dev_err(chg->dev, "failed to allocate extcon device rc=%d\n",
-				rc);
+		dev_err(chg->dev, "failed to allocate extcon device rc=%d\n", rc);
 		goto cleanup;
 	}
 
 	rc = devm_extcon_dev_register(chg->dev, chg->extcon);
 	if (rc < 0) {
-		dev_err(chg->dev, "failed to register extcon device rc=%d\n",
-				rc);
+		dev_err(chg->dev, "failed to register extcon device rc=%d\n", rc);
 		goto cleanup;
 	}
 
@@ -3188,6 +3285,7 @@ static int smb2_probe(struct platform_device *pdev)
 		goto cleanup;
 	}
 
+	bypass_charge_sysfs_init(chg);
 #if defined(CONFIG_MACH_XIAOMI_SDM845)
 	if (chg->wireless_support) {
 		rc = smb2_init_wireless_psy(chip);
@@ -3200,8 +3298,7 @@ static int smb2_probe(struct platform_device *pdev)
 
 	rc = smb2_determine_initial_status(chip);
 	if (rc < 0) {
-		pr_err("Couldn't determine initial status rc=%d\n",
-			rc);
+		pr_err("Couldn't determine initial status rc=%d\n", rc);
 		goto cleanup;
 	}
 
@@ -3260,16 +3357,11 @@ static int smb2_probe(struct platform_device *pdev)
 	pr_info("QPNP SMB2 probed successfully usb:present=%d type=%d batt:present = %d health = %d charge = %d\n",
 		usb_present, chg->real_charger_type,
 		batt_present, batt_health, batt_charge_type);
-		
-    bypass_charge_sysfs_init(chg);
- 	schedule_delayed_work(&chg->reg_work, 60 * HZ);
- 	return rc;
- 	
-#if defined(CONFIG_MACH_XIAOMI_SDM845)
-	schedule_delayed_work(&chg->reg_work, 60 * HZ);
-#endif
 
-	return rc;
+	bypass_charge_sysfs_init(chg);
+	schedule_delayed_work(&chg->reg_work, 60 * HZ);
+
+	return 0;
 
 cleanup:
 	smb2_free_interrupts(chg);
@@ -3298,6 +3390,8 @@ static int smb2_remove(struct platform_device *pdev)
 {
 	struct smb2 *chip = platform_get_drvdata(pdev);
 	struct smb_charger *chg = &chip->chg;
+
+	bypass_charge_sysfs_exit();
 
 	power_supply_unregister(chg->batt_psy);
 	power_supply_unregister(chg->usb_psy);
@@ -3338,6 +3432,7 @@ static int smblib_suspend(struct device *dev)
 {
 	return 0;
 }
+
 static int smblib_resume(struct device *dev)
 {
 	struct smb2 *chip = dev_get_drvdata(dev);
@@ -3357,6 +3452,7 @@ static int smblib_resume(struct device *dev)
 
 	return 0;
 }
+
 static const struct dev_pm_ops smb2_pm_ops = {
 	.suspend	= smblib_suspend,
 	.resume		= smblib_resume,
