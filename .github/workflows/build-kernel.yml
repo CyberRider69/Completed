@@ -67,7 +67,7 @@ jobs:
 
       - name: Apply stored device config
         run: |
-          cp workflow-repo/configs/kernel.config kernel/.config
+          cp workflow-repo/.github/workflows/configs/kernel.config kernel/.config
 
       - name: Enable CONFIG_BINFMT_MISC as a module
         run: |
