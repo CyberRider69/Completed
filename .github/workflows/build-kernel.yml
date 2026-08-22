@@ -117,9 +117,36 @@ jobs:
           make ARCH=${ARCH} O=out CC=clang LLVM=1 LLVM_IAS=1 -j"$(nproc)" modules_prepare
 
       - name: Build full kernel image
+        continue-on-error: true
         run: |
           cd kernel
-          make ARCH=${ARCH} O=out CC=clang LLVM=1 LLVM_IAS=1 -j"$(nproc)"
+          # This step is not required for building binfmt_misc.ko —
+          # modules_prepare (already run above) is the only real
+          # prerequisite for an out-of-tree module build. A full vmlinux
+          # build can fail for reasons entirely unrelated to the module
+          # we actually need (e.g. this tree is missing a vendor firmware
+          # blob for an unrelated touchscreen driver:
+          # drivers/input/touchscreen/xiaomi/.../FT8719_Pramboot_....i).
+          # continue-on-error lets the workflow proceed to the module
+          # build regardless — check this step's log if you also want a
+          # flashable kernel image, but it's not needed for the .ko.
+          #
+          # Output redirected to a log file rather than streamed live —
+          # GitHub Actions' log streamer can fall behind on a build this
+          # verbose, and when the pipe backs up an LLVM tool trying to
+          # write to stdout gets a broken pipe and aborts (even if the
+          # actual compile step was otherwise fine). Only the tail is
+          # shown on failure so the real error is still visible.
+          set +e
+          make ARCH=${ARCH} O=out CC=clang LLVM=1 LLVM_IAS=1 -j"$(nproc)" > ../build.log 2>&1
+          STATUS=$?
+          set -e
+          if [ $STATUS -ne 0 ]; then
+            echo "----- last 200 lines of build.log -----"
+            tail -n 200 ../build.log
+            exit $STATUS
+          fi
+          echo "Kernel build finished, log saved as artifact on failure only."
 
       - name: Build binfmt_misc.ko specifically
         run: |
@@ -145,4 +172,12 @@ jobs:
         with:
           name: binfmt_misc-ko-${{ env.KERNEL_COMMIT }}
           path: kernel/out/fs/binfmt_misc.ko
+
+      - name: Upload full build log (always, for inspection)
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-log-${{ env.KERNEL_COMMIT }}
+          path: build.log
+          if-no-files-found: ignore
           
