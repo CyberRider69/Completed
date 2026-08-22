@@ -73,6 +73,10 @@ jobs:
       - name: Verify clang version
         run: |
           clang --version || true
+          # ld.lld is required for cross-linking arm64 with LLVM=1 — the
+          # host's default GNU ld only knows x86 emulations and fails with
+          # "unrecognised emulation mode: aarch64linux" otherwise.
+          ld.lld --version || echo "WARNING: ld.lld not found in this toolchain archive — cross-linking arm64 will fail"
 
       - name: Apply stored device config
         run: |
@@ -99,7 +103,7 @@ jobs:
       - name: Reconcile config (olddefconfig)
         run: |
           cd kernel
-          make ARCH=${ARCH} O=out CC=clang olddefconfig
+          make ARCH=${ARCH} O=out CC=clang LLVM=1 LLVM_IAS=1 olddefconfig
 
       - name: Confirm symbol landed after reconciliation
         run: |
@@ -110,17 +114,17 @@ jobs:
       - name: Prepare modules
         run: |
           cd kernel
-          make ARCH=${ARCH} O=out CC=clang -j"$(nproc)" modules_prepare
+          make ARCH=${ARCH} O=out CC=clang LLVM=1 LLVM_IAS=1 -j"$(nproc)" modules_prepare
 
       - name: Build full kernel image
         run: |
           cd kernel
-          make ARCH=${ARCH} O=out CC=clang -j"$(nproc)"
+          make ARCH=${ARCH} O=out CC=clang LLVM=1 LLVM_IAS=1 -j"$(nproc)"
 
       - name: Build binfmt_misc.ko specifically
         run: |
           cd kernel
-          make ARCH=${ARCH} O=out CC=clang M=fs
+          make ARCH=${ARCH} O=out CC=clang LLVM=1 LLVM_IAS=1 M=fs
           find out/fs -iname "binfmt_misc.ko"
 
       - name: Show vermagic (must match your running `cat /proc/version`)
