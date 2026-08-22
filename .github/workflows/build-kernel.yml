@@ -185,52 +185,36 @@ jobs:
           echo "----- Remaining KSU/SUSFS lines after disabling (should all show 'is not set') -----"
           grep -iE "KSU" out/.config || echo "(none found — fully removed)"
 
-      - name: Locate and enable SMB2 bypass charging
+      - name: Check SMB2 bypass charging status (diagnostic only — do not auto-enable)
         run: |
           cd kernel
           # "smb2" here is Qualcomm's SMB2 PMIC battery charger driver
-          # (drivers/power/supply/qcom/...), confirmed by the tree's own
-          # commit "power: supply: qcom: smb2: Refactor bypass charging
-          # with locking and cleanup" — not networking SMB2. The exact
-          # CONFIG_ symbol (or whether this is gated by Kconfig at all,
-          # vs. a runtime sysfs node like charging_enabled) isn't known
-          # ahead of time, so discover it from the actual source rather
-          # than guess a symbol name blindly.
+          # (drivers/power/supply/qcom/qpnp-smb2.c), confirmed by the
+          # tree's own commit "power: supply: qcom: smb2: Refactor bypass
+          # charging with locking and cleanup".
+          #
+          # That commit already merged bypass charging in UNCONDITIONALLY
+          # — it's just always compiled into the file, no config gate
+          # needed. A prior version of this step auto-enabled a nearby
+          # CONFIG_ symbol found in the driver's Kconfig, which turned
+          # out to activate a second, older/legacy copy of the same
+          # functions still sitting in the file (is_bypass_active,
+          # bypass_charging_show, bypass_charge_attrs, etc.), causing
+          # "redefinition of ..." build failures. So: the feature is
+          # already present with nothing to enable — this step now only
+          # reports what it finds, it does not modify .config.
           echo "----- Files matching smb2 under power/supply -----"
           find drivers/power/supply -iname "*smb2*" 2>/dev/null | tee /tmp/smb2_files.txt
 
           echo ""
           echo "----- 'bypass' references inside those files -----"
           if [ -s /tmp/smb2_files.txt ]; then
-            grep -ilE "bypass" $(cat /tmp/smb2_files.txt) 2>/dev/null | tee /tmp/smb2_bypass_files.txt
+            grep -ilE "bypass" $(cat /tmp/smb2_files.txt) 2>/dev/null
           fi
 
           echo ""
-          echo "----- CONFIG_ symbols found in Kconfig files near the smb2 driver -----"
-          SMB2_DIR=$(dirname "$(find drivers/power/supply -iname "*smb2*.c" 2>/dev/null | head -n1)")
-          if [ -n "$SMB2_DIR" ] && [ -f "$SMB2_DIR/Kconfig" ]; then
-            cat "$SMB2_DIR/Kconfig"
-            BYPASS_SYMBOL=$(grep -B2 -i "bypass" "$SMB2_DIR/Kconfig" | grep -oE "^config [A-Z0-9_]+" | head -n1 | awk '{print "CONFIG_"$2}')
-            if [ -n "$BYPASS_SYMBOL" ]; then
-              echo "Found candidate symbol: $BYPASS_SYMBOL — enabling it."
-              sed -i "/# ${BYPASS_SYMBOL} is not set/d" out/.config
-              if grep -q "^${BYPASS_SYMBOL}=" out/.config; then
-                sed -i "s/^${BYPASS_SYMBOL}=.*/${BYPASS_SYMBOL}=y/" out/.config
-              else
-                echo "${BYPASS_SYMBOL}=y" >> out/.config
-              fi
-            else
-              echo "No dedicated CONFIG_ symbol found for bypass charging."
-              echo "It's likely controlled at runtime via a sysfs node"
-              echo "(e.g. /sys/class/power_supply/*/charging_enabled or similar"
-              echo "'bypass' attribute) rather than a build-time toggle — the"
-              echo "code is compiled in either way once the SMB2 driver itself"
-              echo "is enabled, and you'd interact with it after boot instead."
-            fi
-          else
-            echo "Could not locate the smb2 driver's Kconfig — check the"
-            echo "'files matching smb2' listing above and inspect manually."
-          fi
+          echo "Bypass charging is already compiled in unconditionally as"
+          echo "part of the driver — no config change needed or applied."
 
       - name: Enable required config symbols (binfmt_misc + namespace/container/overlay)
         run: |
