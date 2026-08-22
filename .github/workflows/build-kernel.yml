@@ -185,36 +185,50 @@ jobs:
           echo "----- Remaining KSU/SUSFS lines after disabling (should all show 'is not set') -----"
           grep -iE "KSU" out/.config || echo "(none found — fully removed)"
 
-      - name: Check SMB2 bypass charging status (diagnostic only — do not auto-enable)
+      - name: Diagnose duplicate bypass-charging code in qpnp-smb2.c
         run: |
           cd kernel
-          # "smb2" here is Qualcomm's SMB2 PMIC battery charger driver
-          # (drivers/power/supply/qcom/qpnp-smb2.c), confirmed by the
-          # tree's own commit "power: supply: qcom: smb2: Refactor bypass
-          # charging with locking and cleanup".
-          #
-          # That commit already merged bypass charging in UNCONDITIONALLY
-          # — it's just always compiled into the file, no config gate
-          # needed. A prior version of this step auto-enabled a nearby
-          # CONFIG_ symbol found in the driver's Kconfig, which turned
-          # out to activate a second, older/legacy copy of the same
-          # functions still sitting in the file (is_bypass_active,
-          # bypass_charging_show, bypass_charge_attrs, etc.), causing
-          # "redefinition of ..." build failures. So: the feature is
-          # already present with nothing to enable — this step now only
-          # reports what it finds, it does not modify .config.
-          echo "----- Files matching smb2 under power/supply -----"
-          find drivers/power/supply -iname "*smb2*" 2>/dev/null | tee /tmp/smb2_files.txt
+          # This tree's qpnp-smb2.c fails to build with "redefinition of
+          # is_bypass_active / bypass_charging_show / bypass_charge_attrs
+          # / bypass_charge_sysfs_init" etc. — every bypass-charging
+          # symbol defined twice in the same file, with NO config symbol
+          # involved (confirmed: identical error persists even with zero
+          # config changes applied). This points to a genuine duplicate
+          # code block left behind by a bad merge/cherry-pick, likely
+          # from the tree's own "Refactor bypass charging with locking
+          # and cleanup" commit. Diagnosing rather than blind-patching,
+          # since guessing at brace-matched removal risks corrupting the
+          # file structure.
+          SMB2_FILE="drivers/power/supply/qcom/qpnp-smb2.c"
+
+          if [ ! -f "$SMB2_FILE" ]; then
+            echo "$SMB2_FILE not found in this tree — nothing to diagnose."
+            exit 0
+          fi
+
+          echo "----- Line numbers of every 'is_bypass_active' occurrence -----"
+          grep -n "is_bypass_active" "$SMB2_FILE"
 
           echo ""
-          echo "----- 'bypass' references inside those files -----"
-          if [ -s /tmp/smb2_files.txt ]; then
-            grep -ilE "bypass" $(cat /tmp/smb2_files.txt) 2>/dev/null
+          echo "----- Line numbers of every 'bypass_charge_sysfs_init' occurrence -----"
+          grep -n "bypass_charge_sysfs_init" "$SMB2_FILE"
+
+          echo ""
+          echo "----- Context around FIRST occurrence (first match line -30/+140) -----"
+          FIRST_LINE=$(grep -n "is_bypass_active" "$SMB2_FILE" | head -n1 | cut -d: -f1)
+          if [ -n "$FIRST_LINE" ]; then
+            sed -n "$((FIRST_LINE > 30 ? FIRST_LINE - 30 : 1)),$((FIRST_LINE + 20))p" "$SMB2_FILE"
           fi
 
           echo ""
-          echo "Bypass charging is already compiled in unconditionally as"
-          echo "part of the driver — no config change needed or applied."
+          echo "----- Context around LAST/duplicate occurrence (from build error, ~line 3038) -----"
+          sed -n '3010,3170p' "$SMB2_FILE"
+
+          echo ""
+          echo "Review the two blocks above — if they're truly identical,"
+          echo "the fix is deleting one of them. Not auto-applied here since"
+          echo "an incorrect line-range removal could break brace matching"
+          echo "and produce a worse, harder-to-diagnose failure."
 
       - name: Enable required config symbols (binfmt_misc + namespace/container/overlay)
         run: |
