@@ -76,18 +76,25 @@ jobs:
 
       - name: Apply stored device config
         run: |
-          cp workflow-repo/.github/workflows/configs/kernel.config kernel/.config
+          # Placed in out/ (not the source root) — Kbuild's out-of-tree
+          # build (O=out) treats any build-artifact-like file sitting in
+          # the source root, including .config, as a "dirty" source tree
+          # and refuses to proceed. out/.config is the correct location.
+          mkdir -p kernel/out
+          cp workflow-repo/.github/workflows/configs/kernel.config kernel/out/.config
 
       - name: Enable CONFIG_BINFMT_MISC as a module
         run: |
           cd kernel
           # fs/Kconfig.binfmt declares BINFMT_MISC as tristate with no hard
           # dependency beyond BLOCK, so setting =m directly is safe here.
-          grep -q "^CONFIG_BINFMT_MISC=" .config \
-            && sed -i 's/^CONFIG_BINFMT_MISC=.*/CONFIG_BINFMT_MISC=m/' .config \
-            || echo "CONFIG_BINFMT_MISC=m" >> .config
+          # Edited in out/.config to match where the config actually lives
+          # for this out-of-tree (O=out) build.
+          grep -q "^CONFIG_BINFMT_MISC=" out/.config \
+            && sed -i 's/^CONFIG_BINFMT_MISC=.*/CONFIG_BINFMT_MISC=m/' out/.config \
+            || echo "CONFIG_BINFMT_MISC=m" >> out/.config
           # Also clear any explicit "is not set" line if present
-          sed -i '/# CONFIG_BINFMT_MISC is not set/d' .config
+          sed -i '/# CONFIG_BINFMT_MISC is not set/d' out/.config
 
       - name: Reconcile config (olddefconfig)
         run: |
