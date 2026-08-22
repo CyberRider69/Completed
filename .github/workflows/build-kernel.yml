@@ -47,6 +47,15 @@ jobs:
           fi
           echo "KERNEL_COMMIT=$(git rev-parse HEAD)" >> "$GITHUB_ENV"
 
+      - name: Clean source tree
+        run: |
+          cd kernel
+          # This tree has generated/build artifacts committed into git
+          # history, which makes Kbuild's out-of-tree build (O=out) refuse
+          # to proceed ("is not clean, please run 'make mrproper'").
+          # mrproper wipes those so the out-of-tree build can start clean.
+          make mrproper || true
+
       - name: Install build dependencies
         run: |
           sudo apt-get update
