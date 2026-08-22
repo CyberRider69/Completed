@@ -56,41 +56,68 @@ jobs:
           # mrproper wipes those so the out-of-tree build can start clean.
           make mrproper || true
 
-      - name: Disable broken FT8719 touchscreen driver
+      - name: Disable broken FocalTech FT8719 touchscreen driver (whole directory)
         run: |
           cd kernel
-          # This driver's source references a firmware blob that isn't
-          # present in the public repo:
-          #   drivers/input/touchscreen/xiaomi/focaltech_touch_mi/focaltech_flash/focaltech_upgrade_ft8719.c
-          #   fatal error: '../include/pramboot/FT8719_Pramboot_V0.5_20171221.i' file not found
-          # Unrelated to binfmt_misc/the kernel image goal, so disable
-          # whatever builds it. Patched directly at the Makefile level
-          # (not via .config) since this step runs before the device
-          # config is applied later in the workflow — a Makefile edit
-          # works regardless of config-application order.
-          SRC_FILE=$(find drivers/input/touchscreen -iname "focaltech_upgrade_ft8719.c" | head -n1)
+          # This driver directory has MULTIPLE files each referencing
+          # separate missing vendor firmware blobs, discovered one at a
+          # time as each gets reached during the build:
+          #   .../focaltech_flash/focaltech_upgrade_ft8719.c
+          #     -> '../include/pramboot/FT8719_Pramboot_V0.5_20171221.i'
+          #   .../focaltech_flash.c
+          #     -> 'include/firmware/fw_ft8719_e10.i'
+          # Rather than patch each file as new ones surface, disable the
+          # entire focaltech_touch_mi driver directory at the parent
+          # Makefile level — unrelated to binfmt_misc/the kernel image
+          # goal, and this device likely doesn't need this specific
+          # Xiaomi touch panel driver anyway.
+          DRIVER_DIR=$(find drivers/input/touchscreen -maxdepth 2 -type d -iname "focaltech_touch_mi" | head -n1)
 
-          if [ -z "$SRC_FILE" ]; then
-            echo "focaltech_upgrade_ft8719.c not found in this tree — nothing to disable, skipping."
+          if [ -z "$DRIVER_DIR" ]; then
+            echo "focaltech_touch_mi directory not found in this tree — nothing to disable, skipping."
             exit 0
           fi
 
-          echo "Found: $SRC_FILE"
-          DRIVER_DIR=$(dirname "$SRC_FILE")
-          MAKEFILE="$DRIVER_DIR/Makefile"
+          echo "Found driver directory: $DRIVER_DIR"
+          PARENT_DIR=$(dirname "$DRIVER_DIR")
+          DRIVER_NAME=$(basename "$DRIVER_DIR")
+          PARENT_MAKEFILE="$PARENT_DIR/Makefile"
 
-          if [ -f "$MAKEFILE" ]; then
-            echo "----- Makefile before -----"
-            cat "$MAKEFILE"
-            # Comment out any line building this object, regardless of
-            # whether it's gated by a CONFIG_ symbol or unconditional
-            # (obj-y). This guarantees it's skipped either way.
-            sed -i 's/^\([^#].*focaltech_upgrade_ft8719\.o.*\)$/# DISABLED (missing firmware blob): \1/' "$MAKEFILE"
-            echo "----- Makefile after -----"
-            cat "$MAKEFILE"
+          if [ -f "$PARENT_MAKEFILE" ]; then
+            echo "----- Parent Makefile before -----"
+            cat "$PARENT_MAKEFILE"
+            # Comment out whatever line descends into this directory,
+            # whether it's `obj-y += focaltech_touch_mi/` or gated behind
+            # a CONFIG_ symbol — either way, nothing inside gets built.
+            sed -i "s|^\([^#].*${DRIVER_NAME}/.*\)\$|# DISABLED (missing firmware blobs): \1|" "$PARENT_MAKEFILE"
+            echo "----- Parent Makefile after -----"
+            cat "$PARENT_MAKEFILE"
+            echo "----- Verifying no remaining active reference to ${DRIVER_NAME} -----"
+            grep -n "$DRIVER_NAME" "$PARENT_MAKEFILE" || echo "(no matches — fully removed)"
           else
-            echo "No Makefile found at $DRIVER_DIR — checking parent directory"
-            find "$(dirname "$DRIVER_DIR")" -maxdepth 1 -iname "Makefile" -exec cat {} \;
+            echo "No Makefile at $PARENT_DIR — cannot cleanly disable via Makefile."
+            echo "Falling back: renaming the driver directory so Kbuild can't find it."
+            mv "$DRIVER_DIR" "${DRIVER_DIR}.disabled"
+          fi
+
+      - name: Verify NVT touch panel driver is present (actual hardware on this device)
+        run: |
+          cd kernel
+          # Poco F1 / Beryllium shipped with two touch panel vendors
+          # across production batches — FocalTech FT8719 (disabled above,
+          # not present on this device) and Novatek (NVT) NT36672A, which
+          # is what's actually on this device. Confirming the NVT driver
+          # exists and wasn't touched by the FocalTech disable step above.
+          NVT_FILES=$(find drivers/input/touchscreen -iname "*nvt*" -o -iname "*novatek*" 2>/dev/null)
+          if [ -n "$NVT_FILES" ]; then
+            echo "NVT/Novatek touch driver files found:"
+            echo "$NVT_FILES"
+          else
+            echo "WARNING: no NVT/Novatek touch driver files found in this tree."
+            echo "If your device uses the NVT touch panel, the flashed kernel"
+            echo "will not have a working touchscreen driver for it. Check"
+            echo "whether it's under a different naming convention:"
+            find drivers/input/touchscreen -maxdepth 2 -type d
           fi
 
       - name: Install build dependencies
