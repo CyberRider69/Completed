@@ -54,12 +54,24 @@ jobs:
             bc bison build-essential flex libssl-dev libelf-dev \
             python3 python3-pip rsync git curl wget xz-utils
 
-      - name: Download and Install Clang ${{ env.CLANG_VERSION }} Prebuilt
+      - name: Download Clang 22.1.8 (matching kernel build compiler)
         run: |
-          mkdir -p $GITHUB_WORKSPACE/toolchain
-          wget https://github.com/llvm/llvm-project/releases/download/llvmorg-${CLANG_VERSION}/clang+llvm-${CLANG_VERSION}-x86_64-linux-gnu-ubuntu-22.04.tar.xz
-          tar -xf clang+llvm-${CLANG_VERSION}-x86_64-linux-gnu-ubuntu-22.04.tar.xz -C $GITHUB_WORKSPACE/toolchain --strip-components=1
-          echo "$GITHUB_WORKSPACE/toolchain/bin" >> "$GITHUB_PATH"
+          # LLVM 22.1.8 prebuilt for x86_64 Linux hosts (cross-compiles to arm64)
+          CLANG_URL="https://github.com/llvm/llvm-project/releases/download/llvmorg-22.1.8/clang+llvm-22.1.8-x86_64-linux-gnu-ubuntu-24.04.tar.xz"
+          echo "Downloading Clang 22.1.8..."
+          wget -q --show-progress -O clang.tar.xz "$CLANG_URL" || {
+            echo "LLVM 22.1.8 prebuilt not found at that URL."
+            echo "Falling back to latest LLVM 22 release..."
+            # Determine latest LLVMorg 22.x tag
+            LATEST_CLANG=$(curl -s https://api.github.com/repos/llvm/llvm-project/releases \
+                          | grep -oP 'llvmorg-22\.\d+\.\d+' | sort -V | tail -1)
+            wget -q --show-progress \
+              "https://github.com/llvm/llvm-project/releases/download/${LATEST_CLANG}/clang+llvm-${LATEST_CLANG#llvmorg-}-x86_64-linux-gnu-ubuntu-24.04.tar.xz" \
+              -O clang.tar.xz
+          }
+          tar -xf clang.tar.xz
+          mv clang+llvm-*/ clang-22
+          echo "$PWD/clang-22/bin" >> $GITHUB_PATH
 
       - name: Verify clang version
         run: |
