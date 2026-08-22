@@ -1,0 +1,127 @@
+name: Build Kernel + binfmt_misc.ko
+
+on:
+  workflow_dispatch:
+
+env:
+  KERNEL_REPO: https://github.com/kyzuna28/mainline.git
+  KERNEL_BRANCH: back
+  CLANG_VERSION: "22.1.8"
+  ARCH: arm64
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout workflow repo (for stored config)
+        uses: actions/checkout@v4
+        with:
+          path: workflow-repo
+
+      - name: Clone kernel source
+        run: |
+          git clone --branch "${KERNEL_BRANCH}" "${KERNEL_REPO}" kernel
+          cd kernel
+          # "g2819f2a0v4d" from `uname -r` is git-describe style output
+          # (g<abbrev-hash>), not a valid ref on its own — resolve it to
+          # a real commit first. The abbreviated hash is the part right
+          # after "g"; trailing characters may be a dirty/build suffix
+          # rather than part of the hash, so try progressively shorter
+          # prefixes until one resolves.
+          RAW="2819f2a0v4d"
+          MATCH=""
+          for LEN in 12 10 8 7; do
+            CANDIDATE="${RAW:0:$LEN}"
+            if git rev-parse --verify --quiet "${CANDIDATE}^{commit}" > /dev/null; then
+              MATCH="${CANDIDATE}"
+              break
+            fi
+          done
+          if [ -z "${MATCH}" ]; then
+            echo "Could not resolve g2819f2a0v4d to a commit on branch ${KERNEL_BRANCH}."
+            echo "Falling back to branch tip — verify this manually before trusting the .ko:"
+            git log -5 --oneline
+          else
+            git checkout "${MATCH}"
+            echo "Pinned to commit: $(git rev-parse HEAD)"
+          fi
+          echo "KERNEL_COMMIT=$(git rev-parse HEAD)" >> "$GITHUB_ENV"
+
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            bc bison build-essential flex libssl-dev libelf-dev \
+            python3 python3-pip rsync git curl wget xz-utils
+
+      - name: Download and Install Clang ${{ env.CLANG_VERSION }} Prebuilt
+        run: |
+          mkdir -p $GITHUB_WORKSPACE/toolchain
+          wget https://github.com/llvm/llvm-project/releases/download/llvmorg-${CLANG_VERSION}/clang+llvm-${CLANG_VERSION}-x86_64-linux-gnu-ubuntu-22.04.tar.xz
+          tar -xf clang+llvm-${CLANG_VERSION}-x86_64-linux-gnu-ubuntu-22.04.tar.xz -C $GITHUB_WORKSPACE/toolchain --strip-components=1
+          echo "$GITHUB_WORKSPACE/toolchain/bin" >> "$GITHUB_PATH"
+
+      - name: Verify clang version
+        run: |
+          clang --version || true
+
+      - name: Apply stored device config
+        run: |
+          cp workflow-repo/configs/kernel.config kernel/.config
+
+      - name: Enable CONFIG_BINFMT_MISC as a module
+        run: |
+          cd kernel
+          # fs/Kconfig.binfmt declares BINFMT_MISC as tristate with no hard
+          # dependency beyond BLOCK, so setting =m directly is safe here.
+          grep -q "^CONFIG_BINFMT_MISC=" .config \
+            && sed -i 's/^CONFIG_BINFMT_MISC=.*/CONFIG_BINFMT_MISC=m/' .config \
+            || echo "CONFIG_BINFMT_MISC=m" >> .config
+          # Also clear any explicit "is not set" line if present
+          sed -i '/# CONFIG_BINFMT_MISC is not set/d' .config
+
+      - name: Reconcile config (olddefconfig)
+        run: |
+          cd kernel
+          make ARCH=${ARCH} O=out CC=clang olddefconfig
+
+      - name: Confirm symbol landed after reconciliation
+        run: |
+          cd kernel
+          grep BINFMT_MISC out/.config
+          grep -A6 "^config BINFMT_MISC" fs/Kconfig.binfmt || true
+
+      - name: Prepare modules
+        run: |
+          cd kernel
+          make ARCH=${ARCH} O=out CC=clang -j"$(nproc)" modules_prepare
+
+      - name: Build full kernel image
+        run: |
+          cd kernel
+          make ARCH=${ARCH} O=out CC=clang -j"$(nproc)"
+
+      - name: Build binfmt_misc.ko specifically
+        run: |
+          cd kernel
+          make ARCH=${ARCH} O=out CC=clang M=fs
+          find out/fs -iname "binfmt_misc.ko"
+
+      - name: Show vermagic (must match your running `cat /proc/version`)
+        run: |
+          cd kernel
+          modinfo out/fs/binfmt_misc.ko | grep vermagic || true
+
+      - name: Upload kernel image
+        uses: actions/upload-artifact@v4
+        with:
+          name: kernel-image-${{ env.KERNEL_COMMIT }}
+          path: |
+            kernel/out/arch/arm64/boot/Image*
+            kernel/out/.config
+
+      - name: Upload binfmt_misc.ko
+        uses: actions/upload-artifact@v4
+        with:
+          name: binfmt_misc-ko-${{ env.KERNEL_COMMIT }}
+          path: kernel/out/fs/binfmt_misc.ko
