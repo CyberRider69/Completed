@@ -151,7 +151,12 @@ jobs:
       - name: Build binfmt_misc.ko specifically
         run: |
           cd kernel
-          make ARCH=${ARCH} O=out CC=clang LLVM=1 LLVM_IAS=1 M=fs
+          # M=fs builds every module under fs/ (obj-m targets), including
+          # unrelated ones like fs/cifs which needs a generated tracepoint
+          # header that only gets created by a full kernel build. Naming
+          # the single target directly builds only binfmt_misc.o/.ko and
+          # skips the rest of fs/ entirely.
+          make ARCH=${ARCH} O=out CC=clang LLVM=1 LLVM_IAS=1 fs/binfmt_misc.ko
           find out/fs -iname "binfmt_misc.ko"
 
       - name: Show vermagic (must match your running `cat /proc/version`)
