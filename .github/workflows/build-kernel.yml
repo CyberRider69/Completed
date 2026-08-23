@@ -151,38 +151,6 @@ jobs:
           mkdir -p kernel/out
           cp workflow-repo/.github/workflows/configs/kernel.config kernel/out/.config
 
-      - name: Enable KernelSU-Next hook mounts + SUSFS (bisecting boot hang)
-        run: |
-          cd kernel
-          # Previous run skipped the disable step entirely, leaving these
-          # symbols at whatever the stored kernel.config already had.
-          # This step goes further: force them explicitly to =y, in case
-          # the stored config had them off/unset and something in this
-          # tree's early boot path expects the hooks present.
-          # Using scripts/config (kernel-maintained) instead of raw sed —
-          # it handles tristate/bool distinctions and missing-symbol cases
-          # correctly, where sed patterns can misfire on edge cases.
-          for opt in \
-            CONFIG_KSU \
-            CONFIG_KSU_MANUAL_HOOK \
-            CONFIG_KSU_SUSFS \
-            CONFIG_KSU_SUSFS_SUS_PATH \
-            CONFIG_KSU_SUSFS_SUS_MOUNT \
-            CONFIG_KSU_SUSFS_SUS_KSTAT \
-            CONFIG_KSU_SUSFS_TRY_UMOUNT \
-            CONFIG_KSU_SUSFS_SPOOF_UNAME \
-            CONFIG_KSU_SUSFS_ENABLE_LOG \
-            CONFIG_KSU_SUSFS_HIDE_KSU_SUSFS_SYMBOLS \
-            CONFIG_KSU_SUSFS_SPOOF_CMDLINE_OR_BOOTCONFIG \
-            CONFIG_KSU_SUSFS_OPEN_REDIRECT \
-            CONFIG_KSU_SUSFS_SUS_MAP \
-            CONFIG_KSU_SUSFS_SUS_MEMFD
-          do
-            ./scripts/config --file out/.config --enable "${opt#CONFIG_}"
-          done
-          echo "----- KSU/SUSFS lines after enabling (should all show '=y') -----"
-          grep -iE "KSU" out/.config || echo "(none found — something's wrong, symbols may not exist in this Kconfig)"
-
       - name: Patch qpnp-smb2.c bypass-charging duplication (precise, two-part fix)
         run: |
           cd kernel
