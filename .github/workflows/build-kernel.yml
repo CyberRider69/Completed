@@ -151,39 +151,123 @@ jobs:
           mkdir -p kernel/out
           cp workflow-repo/.github/workflows/configs/kernel.config kernel/out/.config
 
-      - name: Disable KernelSU / SUSFS (build a normal, non-rooted kernel)
+      - name: Patch qpnp-smb2.c bypass-charging duplication (precise, two-part fix)
         run: |
           cd kernel
-          # This source tree ships with KernelSU-Next's kernel-side hooks
-          # and SUSFS baked in (confirmed present in the dumped device
-          # config). Turning all of it off so the resulting kernel has no
-          # root/hook integration at all — a plain kernel image.
-          for opt in \
-            CONFIG_KSU \
-            CONFIG_KSU_DEBUG \
-            CONFIG_KSU_MANUAL_HOOK \
-            CONFIG_KSU_SUSFS \
-            CONFIG_KSU_SUSFS_SUS_PATH \
-            CONFIG_KSU_SUSFS_SUS_MOUNT \
-            CONFIG_KSU_SUSFS_SUS_KSTAT \
-            CONFIG_KSU_SUSFS_TRY_UMOUNT \
-            CONFIG_KSU_SUSFS_SPOOF_UNAME \
-            CONFIG_KSU_SUSFS_ENABLE_LOG \
-            CONFIG_KSU_SUSFS_HIDE_KSU_SUSFS_SYMBOLS \
-            CONFIG_KSU_SUSFS_SPOOF_CMDLINE_OR_BOOTCONFIG \
-            CONFIG_KSU_SUSFS_OPEN_REDIRECT \
-            CONFIG_KSU_SUSFS_SUS_MAP \
-            CONFIG_KSU_SUSFS_SUS_MEMFD \
-            CONFIG_KSU_DISABLE_MANAGER \
-            CONFIG_KSU_DISABLE_POLICY \
-            CONFIG_KSU_ALLOWLIST_WORKAROUND
-          do
-            sed -i "/^${opt}=/d" out/.config
-            sed -i "/# ${opt} is not set/d" out/.config
-            echo "# ${opt} is not set" >> out/.config
-          done
-          echo "----- Remaining KSU/SUSFS lines after disabling (should all show 'is not set') -----"
-          grep -iE "KSU" out/.config || echo "(none found — fully removed)"
+          # Confirmed by direct inspection of the source (not guessed from
+          # compiler line numbers alone) — there are TWO separate issues:
+          #
+          # A) Lines ~3038-3047: local is_bypass_active()/
+          #    bypass_charge_set_active() shadow the SAME functions
+          #    already declared/defined in the shared header smb-lib.h
+          #    (lines ~519/521). Remove the local shadow copies only.
+          #
+          # B) Lines ~3128 onward: a SECOND, complete, differently-named
+          #    reimplementation of the bypass-charging feature
+          #    (bypass_charging_val / bypass_charge_kobj / global_smb_chg)
+          #    sitting right after the first, working implementation
+          #    (bypass_active / bypass_kobj / bypass_chg, starting
+          #    ~3049) which is the one actually used by the call sites
+          #    further down the file (bypass_charge_sysfs_init/_exit).
+          #    Block 1 defines BOTH init and exit; Block 2 only
+          #    redefines init and never defines exit — so Block 2 is the
+          #    dead/redundant one. Remove Block 2 entirely, keep Block 1.
+          #
+          # A prior automated attempt deleted from A's start through the
+          # END of Block 2 in one pass, which wiped out Block 1 (the only
+          # copy that had sysfs_exit) along with the intended duplicate —
+          # hence "implicit declaration of bypass_charge_sysfs_init/
+          # _exit" afterward. This version handles A and B as two
+          # separate, precisely-bounded deletions instead.
+          SMB2_FILE="drivers/power/supply/qcom/qpnp-smb2.c"
+
+          if [ ! -f "$SMB2_FILE" ]; then
+            echo "$SMB2_FILE not found in this tree — nothing to patch."
+            exit 0
+          fi
+
+          python3 << 'PYEOF'
+          path = "drivers/power/supply/qcom/qpnp-smb2.c"
+          with open(path) as f:
+              lines = f.readlines()
+
+          def find_one(marker, lines):
+              matches = [i for i, l in enumerate(lines) if marker in l]
+              return matches
+
+          # --- Part A: remove local is_bypass_active/bypass_charge_set_active shadow ---
+          a_start_matches = find_one("is_bypass_active(void)", lines)
+          a_end_matches = find_one("static ssize_t bypass_charging_show(struct kobject *kobj,", lines)
+
+          if len(a_start_matches) != 1 or len(a_end_matches) < 1:
+              print(f"Part A: expected exactly 1 'is_bypass_active(void)' "
+                    f"(found {len(a_start_matches)}) and at least 1 "
+                    f"'bypass_charging_show' definition start "
+                    f"(found {len(a_end_matches)}). Aborting — file "
+                    f"structure differs from what was inspected.")
+          else:
+              a_start = a_start_matches[0]
+              a_end = a_end_matches[0]  # first occurrence = Block 1's show, our boundary
+              print(f"Part A: removing lines {a_start + 1}-{a_end} "
+                    f"({a_end - a_start} lines) — local is_bypass_active/"
+                    f"bypass_charge_set_active shadow of smb-lib.h")
+              lines = lines[:a_start] + lines[a_end:]
+
+              # --- Part B: remove the second (duplicate) implementation block ---
+              b_start_matches = find_one("bypass_charging_val = 0;", lines)
+              sysfs_init_matches = find_one("void bypass_charge_sysfs_init(struct smb_charger *chg)", lines)
+
+              if len(b_start_matches) != 1 or len(sysfs_init_matches) != 2:
+                  print(f"Part B: expected exactly 1 'bypass_charging_val = 0;' "
+                        f"(found {len(b_start_matches)}) and exactly 2 "
+                        f"'bypass_charge_sysfs_init' definitions "
+                        f"(found {len(sysfs_init_matches)}) after Part A. "
+                        f"Aborting Part B — Part A's change (if valid) is "
+                        f"still saved; review Part B manually.")
+                  with open(path, 'w') as f:
+                      f.writelines(lines)
+              else:
+                  b_start = b_start_matches[0]
+                  b_sysfs_start = sysfs_init_matches[-1]  # second occurrence = Block 2's duplicate
+
+                  # Brace-count from Block 2's sysfs_init to find its closing brace
+                  depth = 0
+                  started = False
+                  b_end = None
+                  for i in range(b_sysfs_start, len(lines)):
+                      depth += lines[i].count('{')
+                      depth -= lines[i].count('}')
+                      if '{' in lines[i]:
+                          started = True
+                      if started and depth == 0:
+                          b_end = i
+                          break
+
+                  if b_end is None:
+                      print("Part B: could not find matching closing brace "
+                            "for the duplicate bypass_charge_sysfs_init — "
+                            "aborting Part B. Part A's change is saved; "
+                            "review Part B manually.")
+                      with open(path, 'w') as f:
+                          f.writelines(lines)
+                  else:
+                      print(f"Part B: removing lines {b_start + 1}-{b_end + 1} "
+                            f"({b_end - b_start + 1} lines) — duplicate "
+                            f"reimplementation block")
+                      lines = lines[:b_start] + lines[b_end + 1:]
+                      with open(path, 'w') as f:
+                          f.writelines(lines)
+                      print("Both parts patched successfully.")
+          PYEOF
+
+          echo ""
+          echo "----- Post-patch verification -----"
+          echo "is_bypass_active occurrences (expect 0, header copy is in smb-lib.h):"
+          grep -c "is_bypass_active(void)" "$SMB2_FILE" || true
+          echo "bypass_charge_sysfs_init occurrences (expect 1):"
+          grep -c "void bypass_charge_sysfs_init" "$SMB2_FILE" || true
+          echo "bypass_charge_sysfs_exit occurrences (expect 1):"
+          grep -c "void bypass_charge_sysfs_exit" "$SMB2_FILE" || true
 
       - name: Enable required config symbols (binfmt_misc + namespace/container/overlay)
         run: |
@@ -286,15 +370,17 @@ jobs:
           # module" bullet alongside Mount Module/Multi Manager, which
           # usually means separate zips, not embedded). Flagging any
           # matches here for manual review rather than guessing at what
-          # to strip — the kernel config change alone (CONFIG_KSU
-          # disabled) already means KSU has nothing to hook into even if
-          # something references it in the ramdisk.
+          # to strip — NOTE: the KSU/SUSFS config-disable step has been
+          # skipped in this build (bisecting the boot hang), so CONFIG_KSU
+          # is whatever the stored kernel.config already set it to. Unlike
+          # prior runs, this build may still have KSU/SUSFS hooks active
+          # in the kernel image itself, not just the ramdisk.
           echo "----- Files/strings mentioning ksu/kernelsu in the AK3 template -----"
           grep -rli "ksu\|kernelsu" AK3/ 2>/dev/null || echo "(no matches found)"
           echo ""
-          echo "Review any matches above before flashing. Since CONFIG_KSU is"
-          echo "disabled in this build's config, KSU hooks are not present in"
-          echo "the kernel itself regardless of what the ramdisk references."
+          echo "NOTE: the CONFIG_KSU/SUSFS disable step was skipped in this build."
+          echo "This kernel may still have KernelSU/SUSFS hooks active, unlike"
+          echo "previous runs — check kernel/out/.config for CONFIG_KSU if it matters."
 
       - name: Package flashable AK3 zip
         run: |
@@ -350,4 +436,3 @@ jobs:
           name: build-log-${{ env.KERNEL_COMMIT }}
           path: build.log
           if-no-files-found: ignore
-          
