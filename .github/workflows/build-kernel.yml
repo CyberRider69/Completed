@@ -159,6 +159,9 @@ jobs:
           # This step goes further: force them explicitly to =y, in case
           # the stored config had them off/unset and something in this
           # tree's early boot path expects the hooks present.
+          # Using scripts/config (kernel-maintained) instead of raw sed —
+          # it handles tristate/bool distinctions and missing-symbol cases
+          # correctly, where sed patterns can misfire on edge cases.
           for opt in \
             CONFIG_KSU \
             CONFIG_KSU_MANUAL_HOOK \
@@ -175,12 +178,7 @@ jobs:
             CONFIG_KSU_SUSFS_SUS_MAP \
             CONFIG_KSU_SUSFS_SUS_MEMFD
           do
-            sed -i "/# ${opt} is not set/d" out/.config
-            if grep -q "^${opt}=" out/.config; then
-              sed -i "s/^${opt}=.*/${opt}=y/" out/.config
-            else
-              echo "${opt}=y" >> out/.config
-            fi
+            ./scripts/config --file out/.config --enable "${opt#CONFIG_}"
           done
           echo "----- KSU/SUSFS lines after enabling (should all show '=y') -----"
           grep -iE "KSU" out/.config || echo "(none found — something's wrong, symbols may not exist in this Kconfig)"
@@ -312,6 +310,9 @@ jobs:
           # self-tests at boot (not passive like the others), and is the
           # current suspect for the Poco-logo hang after BINFMT_MISC/
           # overlay/squashfs/etc. were confirmed unrelated in prior runs.
+          # Using scripts/config (kernel-maintained) instead of raw sed —
+          # it handles tristate/bool distinctions and missing-symbol cases
+          # correctly, where sed patterns can misfire on edge cases.
           for opt in \
             CONFIG_BINFMT_MISC \
             CONFIG_USER_NS \
@@ -327,19 +328,12 @@ jobs:
             CONFIG_XZ_DEC \
             CONFIG_SECURITYFS
           do
-            sed -i "/# ${opt} is not set/d" out/.config
-            if grep -q "^${opt}=" out/.config; then
-              sed -i "s/^${opt}=.*/${opt}=y/" out/.config
-            else
-              echo "${opt}=y" >> out/.config
-            fi
+            ./scripts/config --file out/.config --enable "${opt#CONFIG_}"
           done
           # Explicitly force the selftest OFF rather than leaving it at
           # whatever the stored kernel.config had — this isolates it as
           # a clean bisection variable instead of an unknown default.
-          sed -i "/^CONFIG_ANDROID_BINDER_IPC_SELFTEST=/d" out/.config
-          sed -i "/# CONFIG_ANDROID_BINDER_IPC_SELFTEST is not set/d" out/.config
-          echo "# CONFIG_ANDROID_BINDER_IPC_SELFTEST is not set" >> out/.config
+          ./scripts/config --file out/.config --disable ANDROID_BINDER_IPC_SELFTEST
           grep -E "CONFIG_BINFMT_MISC|CONFIG_USER_NS|CONFIG_OVERLAY_FS|CONFIG_SQUASHFS|CONFIG_ANDROID_BINDER_IPC_SELFTEST" out/.config
 
       - name: Reconcile config (olddefconfig)
@@ -394,6 +388,10 @@ jobs:
           mkdir -p AK3_extracted AK3
           unzip -o "Xun-mainline-lastbuild_4.19-20260807180156.zip" -d AK3_extracted
 
+          # Copy everything from the template except the old kernel image —
+          # anykernel.sh, ramdisk patches, KernelSU-Next installer scripts,
+          # etc. all carry over unchanged; only Image.gz-dtb gets replaced
+          # with what this run just built.
           find AK3_extracted -type f ! -name "Image.gz-dtb" -print0 | \
           while IFS= read -r -d '' f; do
             rel="${f#AK3_extracted/}"
