@@ -214,16 +214,28 @@ jobs:
           with open(path) as f:
               lines = f.readlines()
 
+          # The compiler notes showed the FIRST is_bypass_active
+          # definition is actually in a different file (smb-lib.h:521),
+          # not within qpnp-smb2.c itself. So within THIS file, only
+          # ONE occurrence is expected — that one occurrence IS the
+          # duplicate (the legitimate copy lives in the header). The
+          # other functions genuinely duplicate within qpnp-smb2.c
+          # itself (both original and duplicate live in this same file,
+          # confirmed by both compiler notes pointing at qpnp-smb2.c).
           start_marker = "is_bypass_active(void)"
           starts = [i for i, l in enumerate(lines) if start_marker in l]
 
-          if len(starts) < 2:
-              print(f"Found {len(starts)} occurrence(s) of is_bypass_active — "
-                    f"expected 2 (original + duplicate). Nothing changed; "
-                    f"this may mean the file structure differs from what "
-                    f"the build log showed. Manual review needed.")
+          if len(starts) < 1:
+              print(f"Found 0 occurrences of is_bypass_active in qpnp-smb2.c — "
+                    f"nothing to patch here, or file structure has changed. "
+                    f"Manual review needed.")
+          elif len(starts) > 1:
+              print(f"Found {len(starts)} occurrences of is_bypass_active in "
+                    f"qpnp-smb2.c — expected exactly 1 (the duplicate; the "
+                    f"legitimate copy lives in smb-lib.h, not this file). "
+                    f"Ambiguous, aborting auto-patch, manual review needed.")
           else:
-              dup_start = starts[-1]
+              dup_start = starts[0]
 
               sysfs_marker = "bypass_charge_sysfs_init"
               sysfs_starts = [i for i, l in enumerate(lines) if f"void {sysfs_marker}" in l]
@@ -425,6 +437,7 @@ jobs:
             kernel/out/arch/arm64/boot/Image*
             kernel/out/.config
 
+      
       - name: Upload full build log (always, for inspection)
         if: always()
         uses: actions/upload-artifact@v4
