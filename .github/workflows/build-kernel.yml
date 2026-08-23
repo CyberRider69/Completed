@@ -185,99 +185,42 @@ jobs:
           echo "----- Remaining KSU/SUSFS lines after disabling (should all show 'is not set') -----"
           grep -iE "KSU" out/.config || echo "(none found — fully removed)"
 
-      - name: Patch duplicate bypass-charging block in qpnp-smb2.c
+      - name: Dump qpnp-smb2.c bypass-charging region (no edits — for manual review)
         run: |
           cd kernel
-          # Confirmed from build log analysis: this file has a genuine
-          # duplicate code block, not a config issue —
-          #   is_bypass_active / bypass_charge_set_active: already
-          #     properly defined once in the shared header smb-lib.h
-          #     (lines ~519/521), but qpnp-smb2.c ALSO locally redefines
-          #     them starting ~line 3038.
-          #   bypass_charging_show/store/attr/attrs/attr_group/
-          #     sysfs_init: each defined twice WITHIN qpnp-smb2.c itself
-          #     (originals ~3049-3097, duplicates ~3130-3160+).
-          # The whole block from the second 'is_bypass_active' through
-          # the end of the second 'bypass_charge_sysfs_init' function is
-          # pure duplicate code. Removed via brace-counting (not a fixed
-          # line range) so this still works if line numbers shift
-          # slightly between commits.
+          # Two automated attempts at removing the duplicate block have
+          # now gone wrong: the first didn't match the pattern at all,
+          # the second removed BOTH copies of bypass_charging_show/
+          # store/attr/attrs/attr_group/sysfs_init instead of just the
+          # duplicate — leaving call sites further down the file with
+          # nothing to call ("implicit declaration of function
+          # 'bypass_charge_sysfs_init'/'bypass_charge_sysfs_exit'").
+          # Stopping the guessing here — dumping the actual literal file
+          # content so the real structure can be seen and a precise,
+          # correct patch written by hand instead of inferred blind from
+          # compiler error line numbers alone.
           SMB2_FILE="drivers/power/supply/qcom/qpnp-smb2.c"
 
           if [ ! -f "$SMB2_FILE" ]; then
-            echo "$SMB2_FILE not found in this tree — nothing to patch."
+            echo "$SMB2_FILE not found in this tree."
             exit 0
           fi
 
-          python3 << 'PYEOF'
-          path = "drivers/power/supply/qcom/qpnp-smb2.c"
-          with open(path) as f:
-              lines = f.readlines()
-
-          # The compiler notes showed the FIRST is_bypass_active
-          # definition is actually in a different file (smb-lib.h:521),
-          # not within qpnp-smb2.c itself. So within THIS file, only
-          # ONE occurrence is expected — that one occurrence IS the
-          # duplicate (the legitimate copy lives in the header). The
-          # other functions genuinely duplicate within qpnp-smb2.c
-          # itself (both original and duplicate live in this same file,
-          # confirmed by both compiler notes pointing at qpnp-smb2.c).
-          start_marker = "is_bypass_active(void)"
-          starts = [i for i, l in enumerate(lines) if start_marker in l]
-
-          if len(starts) < 1:
-              print(f"Found 0 occurrences of is_bypass_active in qpnp-smb2.c — "
-                    f"nothing to patch here, or file structure has changed. "
-                    f"Manual review needed.")
-          elif len(starts) > 1:
-              print(f"Found {len(starts)} occurrences of is_bypass_active in "
-                    f"qpnp-smb2.c — expected exactly 1 (the duplicate; the "
-                    f"legitimate copy lives in smb-lib.h, not this file). "
-                    f"Ambiguous, aborting auto-patch, manual review needed.")
-          else:
-              dup_start = starts[0]
-
-              sysfs_marker = "bypass_charge_sysfs_init"
-              sysfs_starts = [i for i, l in enumerate(lines) if f"void {sysfs_marker}" in l]
-
-              if len(sysfs_starts) < 2:
-                  print(f"Found {len(sysfs_starts)} occurrence(s) of "
-                        f"'void {sysfs_marker}' — expected 2. Aborting "
-                        f"auto-patch, manual review needed.")
-              else:
-                  dup_sysfs_start = sysfs_starts[-1]
-
-                  # Brace-count from the duplicate sysfs_init definition
-                  # to find its matching closing brace.
-                  depth = 0
-                  started = False
-                  end_line = None
-                  for i in range(dup_sysfs_start, len(lines)):
-                      depth += lines[i].count('{')
-                      depth -= lines[i].count('}')
-                      if '{' in lines[i]:
-                          started = True
-                      if started and depth == 0:
-                          end_line = i
-                          break
-
-                  if end_line is None:
-                      print("Could not find matching closing brace for the "
-                            "duplicate bypass_charge_sysfs_init — aborting "
-                            "auto-patch, manual review needed.")
-                  else:
-                      print(f"Removing duplicate block: source lines "
-                            f"{dup_start + 1}-{end_line + 1} "
-                            f"({end_line - dup_start + 1} lines)")
-                      new_lines = lines[:dup_start] + lines[end_line + 1:]
-                      with open(path, 'w') as f:
-                          f.writelines(new_lines)
-                      print("Patched successfully.")
-          PYEOF
+          echo "----- Full file line count -----"
+          wc -l "$SMB2_FILE"
 
           echo ""
-          echo "----- Verifying no duplicate 'is_bypass_active' remains -----"
-          grep -c "is_bypass_active(void)" "$SMB2_FILE" || true
+          echo "----- Every line mentioning bypass (with line numbers) -----"
+          grep -n "bypass" "$SMB2_FILE"
+
+          echo ""
+          echo "----- Literal content, lines 3020-3270 -----"
+          sed -n '3020,3270p' "$SMB2_FILE" | cat -n
+
+          echo ""
+          echo "This build will still fail at the same duplicate-symbol"
+          echo "point — no edit applied this run. Copy the two sections"
+          echo "above for review before the next patch attempt."
 
       - name: Enable required config symbols (binfmt_misc + namespace/container/overlay)
         run: |
@@ -437,7 +380,6 @@ jobs:
             kernel/out/arch/arm64/boot/Image*
             kernel/out/.config
 
-      
       - name: Upload full build log (always, for inspection)
         if: always()
         uses: actions/upload-artifact@v4
@@ -445,3 +387,4 @@ jobs:
           name: build-log-${{ env.KERNEL_COMMIT }}
           path: build.log
           if-no-files-found: ignore
+          
