@@ -185,50 +185,87 @@ jobs:
           echo "----- Remaining KSU/SUSFS lines after disabling (should all show 'is not set') -----"
           grep -iE "KSU" out/.config || echo "(none found — fully removed)"
 
-      - name: Diagnose duplicate bypass-charging code in qpnp-smb2.c
+      - name: Patch duplicate bypass-charging block in qpnp-smb2.c
         run: |
           cd kernel
-          # This tree's qpnp-smb2.c fails to build with "redefinition of
-          # is_bypass_active / bypass_charging_show / bypass_charge_attrs
-          # / bypass_charge_sysfs_init" etc. — every bypass-charging
-          # symbol defined twice in the same file, with NO config symbol
-          # involved (confirmed: identical error persists even with zero
-          # config changes applied). This points to a genuine duplicate
-          # code block left behind by a bad merge/cherry-pick, likely
-          # from the tree's own "Refactor bypass charging with locking
-          # and cleanup" commit. Diagnosing rather than blind-patching,
-          # since guessing at brace-matched removal risks corrupting the
-          # file structure.
+          # Confirmed from build log analysis: this file has a genuine
+          # duplicate code block, not a config issue —
+          #   is_bypass_active / bypass_charge_set_active: already
+          #     properly defined once in the shared header smb-lib.h
+          #     (lines ~519/521), but qpnp-smb2.c ALSO locally redefines
+          #     them starting ~line 3038.
+          #   bypass_charging_show/store/attr/attrs/attr_group/
+          #     sysfs_init: each defined twice WITHIN qpnp-smb2.c itself
+          #     (originals ~3049-3097, duplicates ~3130-3160+).
+          # The whole block from the second 'is_bypass_active' through
+          # the end of the second 'bypass_charge_sysfs_init' function is
+          # pure duplicate code. Removed via brace-counting (not a fixed
+          # line range) so this still works if line numbers shift
+          # slightly between commits.
           SMB2_FILE="drivers/power/supply/qcom/qpnp-smb2.c"
 
           if [ ! -f "$SMB2_FILE" ]; then
-            echo "$SMB2_FILE not found in this tree — nothing to diagnose."
+            echo "$SMB2_FILE not found in this tree — nothing to patch."
             exit 0
           fi
 
-          echo "----- Line numbers of every 'is_bypass_active' occurrence -----"
-          grep -n "is_bypass_active" "$SMB2_FILE"
+          python3 << 'PYEOF'
+          path = "drivers/power/supply/qcom/qpnp-smb2.c"
+          with open(path) as f:
+              lines = f.readlines()
+
+          start_marker = "is_bypass_active(void)"
+          starts = [i for i, l in enumerate(lines) if start_marker in l]
+
+          if len(starts) < 2:
+              print(f"Found {len(starts)} occurrence(s) of is_bypass_active — "
+                    f"expected 2 (original + duplicate). Nothing changed; "
+                    f"this may mean the file structure differs from what "
+                    f"the build log showed. Manual review needed.")
+          else:
+              dup_start = starts[-1]
+
+              sysfs_marker = "bypass_charge_sysfs_init"
+              sysfs_starts = [i for i, l in enumerate(lines) if f"void {sysfs_marker}" in l]
+
+              if len(sysfs_starts) < 2:
+                  print(f"Found {len(sysfs_starts)} occurrence(s) of "
+                        f"'void {sysfs_marker}' — expected 2. Aborting "
+                        f"auto-patch, manual review needed.")
+              else:
+                  dup_sysfs_start = sysfs_starts[-1]
+
+                  # Brace-count from the duplicate sysfs_init definition
+                  # to find its matching closing brace.
+                  depth = 0
+                  started = False
+                  end_line = None
+                  for i in range(dup_sysfs_start, len(lines)):
+                      depth += lines[i].count('{')
+                      depth -= lines[i].count('}')
+                      if '{' in lines[i]:
+                          started = True
+                      if started and depth == 0:
+                          end_line = i
+                          break
+
+                  if end_line is None:
+                      print("Could not find matching closing brace for the "
+                            "duplicate bypass_charge_sysfs_init — aborting "
+                            "auto-patch, manual review needed.")
+                  else:
+                      print(f"Removing duplicate block: source lines "
+                            f"{dup_start + 1}-{end_line + 1} "
+                            f"({end_line - dup_start + 1} lines)")
+                      new_lines = lines[:dup_start] + lines[end_line + 1:]
+                      with open(path, 'w') as f:
+                          f.writelines(new_lines)
+                      print("Patched successfully.")
+          PYEOF
 
           echo ""
-          echo "----- Line numbers of every 'bypass_charge_sysfs_init' occurrence -----"
-          grep -n "bypass_charge_sysfs_init" "$SMB2_FILE"
-
-          echo ""
-          echo "----- Context around FIRST occurrence (first match line -30/+140) -----"
-          FIRST_LINE=$(grep -n "is_bypass_active" "$SMB2_FILE" | head -n1 | cut -d: -f1)
-          if [ -n "$FIRST_LINE" ]; then
-            sed -n "$((FIRST_LINE > 30 ? FIRST_LINE - 30 : 1)),$((FIRST_LINE + 20))p" "$SMB2_FILE"
-          fi
-
-          echo ""
-          echo "----- Context around LAST/duplicate occurrence (from build error, ~line 3038) -----"
-          sed -n '3010,3170p' "$SMB2_FILE"
-
-          echo ""
-          echo "Review the two blocks above — if they're truly identical,"
-          echo "the fix is deleting one of them. Not auto-applied here since"
-          echo "an incorrect line-range removal could break brace matching"
-          echo "and produce a worse, harder-to-diagnose failure."
+          echo "----- Verifying no duplicate 'is_bypass_active' remains -----"
+          grep -c "is_bypass_active(void)" "$SMB2_FILE" || true
 
       - name: Enable required config symbols (binfmt_misc + namespace/container/overlay)
         run: |
@@ -395,4 +432,3 @@ jobs:
           name: build-log-${{ env.KERNEL_COMMIT }}
           path: build.log
           if-no-files-found: ignore
-          
