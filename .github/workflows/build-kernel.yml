@@ -1,4 +1,4 @@
-name: Build Kernel + binfmt_misc.ko
+name: Build Kernel + enable symbols 
 
 on:
   workflow_dispatch:
@@ -47,12 +47,9 @@ jobs:
           fi
           echo "KERNEL_COMMIT=$(git rev-parse HEAD)" >> "$GITHUB_ENV"
 
-      - name: Clean source tree
+      - name: Clean 
         run: |
           cd kernel
-          # This tree has generated/build artifacts committed into git
-          # history, which makes Kbuild's out-of-tree build (O=out) refuse
-          # to proceed ("is not clean, please run 'make mrproper'").
           # mrproper wipes those so the out-of-tree build can start clean.
           make mrproper || true
 
@@ -127,31 +124,6 @@ jobs:
       - name: Patch qpnp-smb2.c bypass-charging duplication (precise, two-part fix)
         run: |
           cd kernel
-          # Confirmed by direct inspection of the source (not guessed from
-          # compiler line numbers alone) — there are TWO separate issues:
-          #
-          # A) Lines ~3038-3047: local is_bypass_active()/
-          #    bypass_charge_set_active() shadow the SAME functions
-          #    already declared/defined in the shared header smb-lib.h
-          #    (lines ~519/521). Remove the local shadow copies only.
-          #
-          # B) Lines ~3128 onward: a SECOND, complete, differently-named
-          #    reimplementation of the bypass-charging feature
-          #    (bypass_charging_val / bypass_charge_kobj / global_smb_chg)
-          #    sitting right after the first, working implementation
-          #    (bypass_active / bypass_kobj / bypass_chg, starting
-          #    ~3049) which is the one actually used by the call sites
-          #    further down the file (bypass_charge_sysfs_init/_exit).
-          #    Block 1 defines BOTH init and exit; Block 2 only
-          #    redefines init and never defines exit — so Block 2 is the
-          #    dead/redundant one. Remove Block 2 entirely, keep Block 1.
-          #
-          # A prior automated attempt deleted from A's start through the
-          # END of Block 2 in one pass, which wiped out Block 1 (the only
-          # copy that had sysfs_exit) along with the intended duplicate —
-          # hence "implicit declaration of bypass_charge_sysfs_init/
-          # _exit" afterward. This version handles A and B as two
-          # separate, precisely-bounded deletions instead.
           SMB2_FILE="drivers/power/supply/qcom/qpnp-smb2.c"
 
           if [ ! -f "$SMB2_FILE" ]; then
@@ -266,7 +238,7 @@ jobs:
         run: |
           cd kernel
           for opt in UPROBES XZ_DEC CHECKPOINT_RESTORE \
-            SECURITYFS VT NET_NSH USER_NS \
+            SECURITYFS VT NET_NSH DEVTMPFS_MOUNT USER_NS \
             BINFMT_MISC SQUASHFS KPROBES ; do
             if grep -rq "^config ${opt}\$" --include='Kconfig*' .; then
               echo "REAL   CONFIG_${opt}"
@@ -280,16 +252,22 @@ jobs:
           cd kernel
           make ARCH=${ARCH} O=out CC=clang LLVM=1 LLVM_IAS=1 olddefconfig
 
-      - name: Confirm symbol landed after reconciliation
+      - name: Verify final config
         run: |
           cd kernel
-          grep BINFMT_MISC out/.config
-          grep -A6 "^config BINFMT_MISC" fs/Kconfig.binfmt || true
+          echo "Checking out/.config BEFORE build (this is what actually gets compiled):"
+          grep -E "CONFIG_BINFMT_MISC|CONFIG_USER_NS|CONFIG_NET_NSH|CONFIG_KPROBES|CONFIG_UPROBES|CONFIG_CHECKPOINT_RESTORE|CONFIG_OVERLAY_FS_REDIRECT_DIR|CONFIG_SYSVIPC|CONFIG_PID_NS|CONFIG_UTS_NS|CONFIG_FHANDLE|CONFIG_SQUASHFS|CONFIG_XZ_DEC|CONFIG_SECURITYFS|CONFIG_MEMFD_CREATE|CONFIG_EXT4_FS_POSIX_ACL|CONFIG_DEVTMPFS|CONFIG_VETH|CONFIG_CGROUP_DEVICE|CONFIG_CGROUP_PIDS|CONFIG_VT|CONFIG_DEVTMPFS_MOUNT|CONFIG_DEVPTS_FS|CONFIG_BLK_CGROUP|CONFIG_SYSVIPC_SYSCTL|CONFIG_NF_TABLES|CONFIG_NAMESPACES" out/.config
 
-      - name: Prepare modules
-        run: |
-          cd kernel
-          make ARCH=${ARCH} O=out CC=clang LLVM=1 LLVM_IAS=1 -j"$(nproc)" modules_prepare
+          echo ""
+          echo "--- NetHunter-critical subset (chroot/container/KeX depend on these) ---"
+          for opt in USER_NS PID_NS UTS_NS BINFMT_MISC ; do
+            line=$(grep "^CONFIG_${opt}=" out/.config || true)
+            if [ -n "$line" ]; then
+              echo "OK    $line"
+            else
+              echo "MISSING  CONFIG_${opt}  <- dropped by olddefconfig, NetHunter functionality may break"
+            fi
+          done
 
       - name: Build full kernel image
         run: |
