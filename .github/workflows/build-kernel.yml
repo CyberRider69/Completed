@@ -22,28 +22,18 @@ jobs:
         run: |
           git clone --branch "${KERNEL_BRANCH}" "${KERNEL_REPO}" kernel
           cd kernel
-          # "g2819f2a0v4d" from `uname -r` is git-describe style output
-          # (g<abbrev-hash>), not a valid ref on its own â€” resolve it to
-          # a real commit first. The abbreviated hash is the part right
-          # after "g"; trailing characters may be a dirty/build suffix
-          # rather than part of the hash, so try progressively shorter
-          # prefixes until one resolves.
-          RAW="2819f2a0v4d"
           MATCH=""
-          for LEN in 12 10 8 7; do
-            CANDIDATE="${RAW:0:$LEN}"
+          for CANDIDATE in "g2819f2a0v4d"; do
             if git rev-parse --verify --quiet "${CANDIDATE}^{commit}" > /dev/null; then
               MATCH="${CANDIDATE}"
               break
             fi
           done
-          if [ -z "${MATCH}" ]; then
-            echo "Could not resolve g2819f2a0v4d to a commit on branch ${KERNEL_BRANCH}."
-            echo "Falling back to branch tip â€” verify this manually before trusting the .ko:"
-            git log -5 --oneline
-          else
+          if [ -n "${MATCH}" ]; then
             git checkout "${MATCH}"
             echo "Pinned to commit: $(git rev-parse HEAD)"
+          else
+            echo "Candidate commit not found, staying on branch ${KERNEL_BRANCH}"
           fi
           echo "KERNEL_COMMIT=$(git rev-parse HEAD)" >> "$GITHUB_ENV"
           
@@ -228,17 +218,268 @@ jobs:
             CONFIG_SQUASHFS \
             CONFIG_XZ_DEC \
             CONFIG_FANOTIFY \
-            CONFIG_SECURITYFS
+            CONFIG_SECURITYFS \
+            CONFIG_KCMP
           do
             ./scripts/config --file out/.config --enable "${opt#CONFIG_}"
           done
+
+      - name: Backport openat2() syscall (missing in this tree, breaks systemd 261.2 machine-id setup)
+        run: |
+          cd kernel
+
+          # 1. uapi header: struct open_how + RESOLVE_* flags
+          cat > include/uapi/linux/openat2.h << 'HDREOF'
+          #ifndef _UAPI_LINUX_OPENAT2_H
+          #define _UAPI_LINUX_OPENAT2_H
+
+          #include <linux/types.h>
+
+          struct open_how {
+          	__u64 flags;
+          	__u64 mode;
+          	__u64 resolve;
+          };
+
+          #define OPEN_HOW_SIZE_VER0	24 /* sizeof first published struct */
+
+          #define RESOLVE_NO_XDEV		0x01
+          #define RESOLVE_NO_MAGICLINKS	0x02
+          #define RESOLVE_NO_SYMLINKS	0x04
+          #define RESOLVE_BENEATH		0x08
+          #define RESOLVE_IN_ROOT		0x10
+
+          #endif /* _UAPI_LINUX_OPENAT2_H */
+          HDREOF
+
+          # 2. Minimal implementation as its own translation unit — kept out of
+          #    fs/open.c on purpose so this backport never conflicts with the
+          #    existing do_sys_open()/build_open_flags() path on this tree.
+          #    NOTE: this is a MINIMAL backport. RESOLVE_* path-resolution
+          #    flags (BENEATH/IN_ROOT/NO_SYMLINKS etc.) are rejected with
+          #    -EINVAL rather than implemented, since that requires namei.c
+          #    changes this tree doesn't have. systemd's machine-id setup
+          #    path calls openat2() with resolve=0 in the common case, which
+          #    this backport handles as a normal open().
+          cat > fs/openat2_backport.c << 'SRCEOF'
+          // SPDX-License-Identifier: GPL-2.0
+          /* Minimal openat2(2) backport for kernels predating 5.6. */
+          #include <linux/kernel.h>
+          #include <linux/fs.h>
+          #include <linux/file.h>
+          #include <linux/namei.h>
+          #include <linux/syscalls.h>
+          #include <linux/fsnotify.h>
+          #include <linux/uaccess.h>
+          #include <linux/sched.h>
+          #include <uapi/linux/openat2.h>
+
+          static long do_sys_openat2_backport(int dfd, const char __user *filename,
+          				     struct open_how *how)
+          {
+          	struct open_flags op;
+          	struct filename *tmp;
+          	int fd;
+
+          	fd = build_open_flags((int)how->flags, (umode_t)how->mode, &op);
+          	if (fd)
+          		return fd;
+
+          	tmp = getname(filename);
+          	if (IS_ERR(tmp))
+          		return PTR_ERR(tmp);
+
+          	fd = get_unused_fd_flags((int)how->flags);
+          	if (fd >= 0) {
+          		struct file *f = do_filp_open(dfd, tmp, &op);
+
+          		if (IS_ERR(f)) {
+          			put_unused_fd(fd);
+          			fd = PTR_ERR(f);
+          		} else {
+          			fsnotify_open(f);
+          			fd_install(fd, f);
+          		}
+          	}
+          	putname(tmp);
+          	return fd;
+          }
+
+          SYSCALL_DEFINE4(openat2, int, dfd, const char __user *, filename,
+          		 struct open_how __user *, how, size_t, usize)
+          {
+          	struct open_how tmp;
+
+          	if (unlikely(usize < OPEN_HOW_SIZE_VER0))
+          		return -EINVAL;
+          	if (unlikely(usize > PAGE_SIZE))
+          		return -E2BIG;
+
+          	memset(&tmp, 0, sizeof(tmp));
+          	if (usize > sizeof(tmp)) {
+          		/* caller passed a newer/larger struct than we know;
+          		 * only accept if the extra tail is all zero */
+          		char __user *addr = (char __user *)how + sizeof(tmp);
+          		size_t rest = usize - sizeof(tmp);
+          		while (rest--) {
+          			char c;
+
+          			if (get_user(c, addr++))
+          				return -EFAULT;
+          			if (c)
+          				return -E2BIG;
+          		}
+          		usize = sizeof(tmp);
+          	}
+          	if (copy_from_user(&tmp, how, usize))
+          		return -EFAULT;
+
+          	/* Minimal backport: no RESOLVE_* support yet. */
+          	if (tmp.resolve != 0)
+          		return -EINVAL;
+
+          	return do_sys_openat2_backport(dfd, filename, &tmp);
+          }
+          SRCEOF
+
+          # 3. Wire the new object into the build
+          if ! grep -q "openat2_backport.o" fs/Makefile; then
+            echo "obj-y += openat2_backport.o" >> fs/Makefile
+          fi
+
+          # 4. Native (64-bit) syscall table + count
+          NATIVE_UNISTD="include/uapi/asm-generic/unistd.h"
+          if ! grep -q "__NR_openat2" "$NATIVE_UNISTD"; then
+            python3 - << 'PYEOF'
+          path = "include/uapi/asm-generic/unistd.h"
+          with open(path) as f:
+              lines = f.readlines()
+          out = []
+          inserted = False
+          for line in lines:
+              if not inserted and line.strip().startswith("#define __NR_syscalls"):
+                  out.append("#define __NR_openat2 437\n")
+                  out.append("__SYSCALL(__NR_openat2, sys_openat2)\n")
+                  # bump the count that follows on this same line
+                  parts = line.split()
+                  old_count = int(parts[-1])
+                  new_count = max(old_count, 438)
+                  line = f"#define __NR_syscalls {new_count}\n"
+                  inserted = True
+              out.append(line)
+          if not inserted:
+              raise SystemExit("Could not find __NR_syscalls line — check file format manually")
+          with open(path, "w") as f:
+              f.writelines(out)
+          PYEOF
+          fi
+
+          # 5. Compat (32-bit) syscall table
+          COMPAT_UNISTD="arch/arm64/include/asm/unistd32.h"
+          if ! grep -q "__NR_openat2" "$COMPAT_UNISTD"; then
+            python3 - << 'PYEOF'
+          path = "arch/arm64/include/asm/unistd32.h"
+          with open(path) as f:
+              lines = f.readlines()
+          out = []
+          inserted = False
+          for i, line in enumerate(lines):
+              out.append(line)
+              if not inserted and line.strip() == "#define __NR_finit_module 379":
+                  out.insert(len(out) - 1, "#define __NR_openat2 437\n")
+                  out.insert(len(out) - 1, "__SYSCALL(__NR_openat2, sys_openat2)\n")
+                  inserted = True
+          if not inserted:
+              raise SystemExit("Could not find anchor line in unistd32.h — check file format manually")
+          with open(path, "w") as f:
+              f.writelines(out)
+          PYEOF
+          fi
+
+          echo "----- Verification -----"
+          grep -n "openat2\|__NR_syscalls" include/uapi/asm-generic/unistd.h
+          grep -n "openat2" arch/arm64/include/asm/unistd32.h
+          grep -n "openat2_backport" fs/Makefile
+
+      - name: Backport kernel/kcmp.c (source file missing from this tree)
+        run: |
+          cd kernel
+
+          # 1. Fetch canonical kcmp.c from a matching 4.19 upstream tag.
+          #    kcmp is small/self-contained (task/fd comparison only) — no
+          #    VFS internals, so a straight drop-in from the same major
+          #    version compiles cleanly without adaptation.
+          if [ ! -f kernel/kcmp.c ]; then
+            echo "kernel/kcmp.c missing — fetching from upstream v4.19"
+            wget -q "https://raw.githubusercontent.com/torvalds/linux/v4.19/kernel/kcmp.c" -O kernel/kcmp.c
+            if [ ! -s kernel/kcmp.c ]; then
+              echo "ERROR: download failed or empty file — aborting this step"
+              exit 1
+            fi
+            echo "Fetched kernel/kcmp.c ($(wc -l < kernel/kcmp.c) lines)"
+          else
+            echo "kernel/kcmp.c already present — leaving as-is"
+          fi
+
+          # 2. Ensure kernel/Makefile actually builds it
+          if ! grep -q "kcmp.o" kernel/Makefile; then
+            echo "obj-\$(CONFIG_KCMP) += kcmp.o" >> kernel/Makefile
+            echo "Added kcmp.o build rule to kernel/Makefile"
+          else
+            echo "kernel/Makefile already references kcmp.o"
+          fi
+
+          # 3. Ensure a Kconfig entry exists to actually select it
+          if ! grep -rq "^config KCMP$" --include='Kconfig*' .; then
+            echo "No Kconfig entry for KCMP found — adding minimal stanza to init/Kconfig"
+            if [ -f init/Kconfig ] && grep -q "^config CHECKPOINT_RESTORE$" init/Kconfig; then
+              python3 - << 'PYEOF'
+          path = "init/Kconfig"
+          with open(path) as f:
+              content = f.read()
+          anchor = "config CHECKPOINT_RESTORE"
+          idx = content.find(anchor)
+          if idx == -1:
+              raise SystemExit("Anchor not found — add KCMP Kconfig entry manually")
+          # find end of this config block (next blank-line-preceded 'config ' or 'endmenu'/'endif')
+          end = content.find("\nconfig ", idx + len(anchor))
+          if end == -1:
+              end = len(content)
+          stanza = (
+              "\nconfig KCMP\n"
+              "\tbool \"Enable kcmp() system call\" if EXPERT\n"
+              "\tdefault y if CHECKPOINT_RESTORE\n"
+              "\thelp\n"
+              "\t  Enable the kernel resource comparison syscall, used by\n"
+              "\t  CRIU and by userspace sandboxing/container tools (NetHunter\n"
+              "\t  chroot) to compare two processes' resources (fds, mm, etc).\n"
+              "\t  If unsure say N.\n"
+          )
+          content = content[:end] + stanza + content[end:]
+          with open(path, "w") as f:
+              f.write(content)
+          PYEOF
+              echo "Kconfig entry added"
+            else
+              echo "WARNING: could not locate init/Kconfig or CHECKPOINT_RESTORE anchor."
+              echo "Add the KCMP Kconfig stanza manually before this will build."
+              exit 1
+            fi
+          else
+            echo "Kconfig entry for KCMP already exists"
+          fi
+
+          echo "----- Verification -----"
+          ls -la kernel/kcmp.c
+          grep -n "kcmp" kernel/Makefile
+          grep -n "^config KCMP" init/Kconfig
 
       - name: Check which symbols actually exist in this tree's Kconfig
         run: |
           cd kernel
           for opt in UPROBES XZ_DEC CHECKPOINT_RESTORE \
             SECURITYFS VT NET_NSH DEVTMPFS_MOUNT USER_NS \
-            BINFMT_MISC SQUASHFS KPROBES ; do
+            BINFMT_MISC SQUASHFS KPROBES KCMP ; do
             if grep -rq "^config ${opt}\$" --include='Kconfig*' .; then
               echo "REAL   CONFIG_${opt}"
             else
@@ -255,10 +496,11 @@ jobs:
         run: |
           cd kernel
           echo "Checking out/.config BEFORE build (this is what actually gets compiled):"
-          grep -E "CONFIG_BINFMT_MISC|CONFIG_USER_NS|CONFIG_NET_NSH|CONFIG_KPROBES| CONFIG_CHECKPOINT_RESTORECONFIG_DEVTMPFS_MOUNT|CONFIG_VT|CONFIG_SQUASHFS|CONFIG_XZ_DEC|CONFIG_FANOTIFY|CONFIG_SECURITYFS|CONFIG_KCMP" out/.config
+          grep -E "CONFIG_BINFMT_MISC|CONFIG_USER_NS|CONFIG_NET_NSH|CONFIG_KPROBES|CONFIG_CHECKPOINT_RESTORE|CONFIG_DEVTMPFS_MOUNT|CONFIG_VT|CONFIG_SQUASHFS|CONFIG_XZ_DEC|CONFIG_FANOTIFY|CONFIG_SECURITYFS|CONFIG_KCMP" out/.config
+
           echo ""
           echo "--- NetHunter-critical subset (chroot/container/KeX depend on these) ---"
-          for opt in BINFMT_MISC USER_NS NET_NSH KPROBES CHECKPOINT_RESTORE DEVTMPFS_MOUNT VT SQUASHFS XZ_DEC FANOTIFY SECURITYFS KCMP ; do
+          for opt in USER_NS PID_NS UTS_NS BINFMT_MISC ; do
             line=$(grep "^CONFIG_${opt}=" out/.config || true)
             if [ -n "$line" ]; then
               echo "OK    $line"
