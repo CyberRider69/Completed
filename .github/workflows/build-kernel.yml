@@ -228,7 +228,7 @@ jobs:
             CONFIG_SQUASHFS \
             CONFIG_XZ_DEC \
             CONFIG_FANOTIFY \
-            CONFIG_SECURITYFS \
+            CONFIG_SECURITYFS
           do
             ./scripts/config --file out/.config --enable "${opt#CONFIG_}"
           done
