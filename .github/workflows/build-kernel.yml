@@ -272,37 +272,26 @@ jobs:
       - name: Enable required config symbols (binfmt_misc + namespace/container/overlay)
         run: |
           cd kernel
-          # All =y, built directly into the kernel image — no separate
-          # .ko or boot-time loading script needed for any of these.
-          # CONFIG_ANDROID_BINDER_IPC_SELFTEST removed — it runs binder
-          # self-tests at boot (not passive like the others), and is the
-          # current suspect for the Poco-logo hang after BINFMT_MISC/
-          # overlay/squashfs/etc. were confirmed unrelated in prior runs.
-          # Using scripts/config (kernel-maintained) instead of raw sed —
-          # it handles tristate/bool distinctions and missing-symbol cases
-          # correctly, where sed patterns can misfire on edge cases.
+          # All =y, built directly into the kernel image
           for opt in \
             CONFIG_BINFMT_MISC \
             CONFIG_USER_NS \
             CONFIG_NET_NSH \
             CONFIG_KPROBES \
             CONFIG_CHECKPOINT_RESTORE \
-            CONFIG_OVERLAY_FS_REDIRECT_DIR \
-            CONFIG_OVERLAY_FS_INDEX \
-            CONFIG_OVERLAY_FS_XINO_AUTO \
-            CONFIG_OVERLAY_FS_METACOPY \
-            CONFIG_FHANDLE \
+            CONFIG_DEVTMPFS_MOUNT \
+            CONFIG_VT \
+            CONFIG_VT_CONSOLE \
+            CONFIG_KCMP \
             CONFIG_SQUASHFS \
             CONFIG_XZ_DEC \
-            CONFIG_SECURITYFS
+            CONFIG_FANOTIFY \
+            CONFIG_SECURITYFS \
           do
             ./scripts/config --file out/.config --enable "${opt#CONFIG_}"
           done
-          # Explicitly force the selftest OFF rather than leaving it at
-          # whatever the stored kernel.config had — this isolates it as
-          # a clean bisection variable instead of an unknown default.
-          ./scripts/config --file out/.config --disable ANDROID_BINDER_IPC_SELFTEST
-          grep -E "CONFIG_BINFMT_MISC|CONFIG_USER_NS|CONFIG_OVERLAY_FS|CONFIG_SQUASHFS|CONFIG_ANDROID_BINDER_IPC_SELFTEST" out/.config
+          # Explicitly force the selftest OFF rather than leaving it
+          grep -E "CONFIG_BINFMT_MISC|CONFIG_USER_NS|CONFIG_NET_NSH|CONFIG_KPROBES|CONFIG_SQUASHFS|" out/.config
 
       - name: Reconcile config (olddefconfig)
         run: |
@@ -323,27 +312,13 @@ jobs:
       - name: Build full kernel image
         run: |
           cd kernel
-          # This step is now the actual point of the workflow — the goal
-          # is a flashable image with BINFMT_MISC=y baked in, not just a
-          # standalone .ko. Known blocker: this tree is missing a vendor
-          # firmware blob for an unrelated touchscreen driver
-          # (drivers/input/touchscreen/xiaomi/.../FT8719_Pramboot_....i)
-          # which will fail this build until that's fixed (restore the
-          # blob, or patch that driver out of the build).
-          #
-          # Output redirected to a log file rather than streamed live —
-          # GitHub Actions' log streamer can fall behind on a build this
-          # verbose, and when the pipe backs up an LLVM tool trying to
-          # write to stdout gets a broken pipe and aborts (even if the
-          # actual compile step was otherwise fine). Only the tail is
-          # shown on failure so the real error is still visible.
+          # This step is now the actual point of the workflow
           set +e
           make ARCH=${ARCH} O=out CC=clang LLVM=1 LLVM_IAS=1 -j"$(nproc)" > ../build.log 2>&1
           STATUS=$?
           set -e
           if [ $STATUS -ne 0 ]; then
-            echo "----- last 200 lines of build.log -----"
-            tail -n 200 ../build.log
+            echo "Kernel build not finished."
             exit $STATUS
           fi
           echo "Kernel build finished."
@@ -351,48 +326,21 @@ jobs:
       - name: Fetch AK3 template
         run: |
           pip install gdown
-          gdown "https://drive.google.com/uc?id=1_9swZ7pelAf2tChCIX53uu0ZPvOJWTZM" -O "Xun-mainline-lastbuild_4.19-20260807180156.zip"
+          gdown "https://drive.google.com/uc?id=1dv-XzO_YaJwcm6cEfqGylCvq1PUuNNxb" -O beryllium_419-fast_charge.zip
 
           mkdir -p AK3_extracted AK3
-          unzip -o "Xun-mainline-lastbuild_4.19-20260807180156.zip" -d AK3_extracted
+          unzip -o beryllium_419-fast_charge.zip -d AK3_extracted
 
-          # Copy everything from the template except the old kernel image —
-          # anykernel.sh, ramdisk patches, KernelSU-Next installer scripts,
-          # etc. all carry over unchanged; only Image.gz-dtb gets replaced
-          # with what this run just built.
-          find AK3_extracted -type f ! -name "Image.gz-dtb" -print0 | \
+          find AK3_extracted -type f ! -name Image.gz-dtb -print0 | \
           while IFS= read -r -d '' f; do
             rel="${f#AK3_extracted/}"
             mkdir -p "AK3/$(dirname "$rel")"
             cp "$f" "AK3/$rel"
           done
 
-      - name: Check AK3 template for embedded KernelSU references
-        run: |
-          # Not confirmed whether anykernel.sh bundles a KSU installer
-          # inline vs. it being a separate flash-afterward module (the
-          # original build notes list KernelSU-Next as a "Mandatory
-          # module" bullet alongside Mount Module/Multi Manager, which
-          # usually means separate zips, not embedded). Flagging any
-          # matches here for manual review rather than guessing at what
-          # to strip — NOTE: this build explicitly force-enables CONFIG_KSU
-          # and SUSFS symbols (bisecting the boot hang), so the kernel
-          # image itself has KernelSU-Next hooks and SUSFS active, not
-          # just whatever the ramdisk/AK3 template references.
-          echo "----- Files/strings mentioning ksu/kernelsu in the AK3 template -----"
-          grep -rli "ksu\|kernelsu" AK3/ 2>/dev/null || echo "(no matches found)"
-          echo ""
-          echo "NOTE: this build explicitly enabled CONFIG_KSU/SUSFS (=y)."
-          echo "KernelSU-Next hooks and SUSFS are active in this kernel image,"
-          echo "unlike the two prior bisection runs."
-
       - name: Package flashable AK3 zip
         run: |
-          # This tree's full kernel build is expected to fail on an
-          # unrelated missing vendor blob (see "Build full kernel image"
-          # above), so Image/Image.gz-dtb may not exist. Only package if
-          # the build actually produced one — skip cleanly otherwise
-          # rather than shipping a broken zip.
+          # This tree's full kernel build is expected to fail for an unrelated missing vendor blob
           IMAGE_PATH=""
           for candidate in \
             kernel/out/arch/arm64/boot/Image.gz-dtb \
@@ -408,35 +356,17 @@ jobs:
           if [ -z "$IMAGE_PATH" ]; then
             echo "No kernel Image found — full kernel build did not complete"
             echo "(see 'Build full kernel image' step log / build-log artifact)."
-            echo "Skipping AK3 packaging; only binfmt_misc.ko is available this run."
             exit 0
           fi
 
           cp "$IMAGE_PATH" AK3/Image.gz-dtb
           cd AK3
-          zip -r9 "../Xun-mainline-${KERNEL_COMMIT}.zip" . -x ".git*"
+          zip -r9 "../beryllium_419-fast_charge_smb2cpatch-${KERNEL_COMMIT}.zip" . -x ".git*"
           cd ..
           ls -la "Xun-mainline-${KERNEL_COMMIT}.zip"
 
       - name: Upload flashable AK3 zip
         uses: actions/upload-artifact@v4
         with:
-          name: flashable-zip-${{ env.KERNEL_COMMIT }}
-          path: Xun-mainline-*.zip
-          if-no-files-found: ignore
-
-      - name: Upload kernel image
-        uses: actions/upload-artifact@v4
-        with:
-          name: kernel-image-${{ env.KERNEL_COMMIT }}
-          path: |
-            kernel/out/arch/arm64/boot/Image*
-            kernel/out/.config
-
-      - name: Upload full build log (always, for inspection)
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: build-log-${{ env.KERNEL_COMMIT }}
-          path: build.log
-          if-no-files-found: ignore
+          name: beryllium_419-fast_charge_smb2cpatch-${{ env.KERNEL_COMMIT }}
+          path: beryllium_419-fast_charge_smb2cpatch-*.zip
