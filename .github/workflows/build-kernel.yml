@@ -22,35 +22,24 @@ jobs:
         run: |
           git clone --branch "${KERNEL_BRANCH}" "${KERNEL_REPO}" kernel
           cd kernel
-          # "g2819f2a0v4d" from `uname -r` is git-describe style output
-          # (g<abbrev-hash>), not a valid ref on its own — resolve it to
-          # a real commit first. The abbreviated hash is the part right
-          # after "g"; trailing characters may be a dirty/build suffix
-          # rather than part of the hash, so try progressively shorter
-          # prefixes until one resolves.
-          RAW="2819f2a0v4d"
           MATCH=""
-          for LEN in 12 10 8 7; do
-            CANDIDATE="${RAW:0:$LEN}"
+          for CANDIDATE in "g2819f2a0v4d"; do
             if git rev-parse --verify --quiet "${CANDIDATE}^{commit}" > /dev/null; then
               MATCH="${CANDIDATE}"
               break
             fi
           done
-          if [ -z "${MATCH}" ]; then
-            echo "Could not resolve g2819f2a0v4d to a commit on branch ${KERNEL_BRANCH}."
-            echo "Falling back to branch tip — verify this manually before trusting the .ko:"
-            git log -5 --oneline
-          else
+          if [ -n "${MATCH}" ]; then
             git checkout "${MATCH}"
             echo "Pinned to commit: $(git rev-parse HEAD)"
+          else
+            echo "Candidate commit not found, staying on branch ${KERNEL_BRANCH}"
           fi
           echo "KERNEL_COMMIT=$(git rev-parse HEAD)" >> "$GITHUB_ENV"
-
+          
       - name: Clean 
         run: |
           cd kernel
-          # mrproper wipes those so the out-of-tree build can start clean.
           make mrproper || true
 
       - name: Disable broken FocalTech FT8719 touchscreen driver (whole directory)
