@@ -59,18 +59,6 @@ jobs:
       - name: Disable broken FocalTech FT8719 touchscreen driver (whole directory)
         run: |
           cd kernel
-          # This driver directory has MULTIPLE files each referencing
-          # separate missing vendor firmware blobs, discovered one at a
-          # time as each gets reached during the build:
-          #   .../focaltech_flash/focaltech_upgrade_ft8719.c
-          #     -> '../include/pramboot/FT8719_Pramboot_V0.5_20171221.i'
-          #   .../focaltech_flash.c
-          #     -> 'include/firmware/fw_ft8719_e10.i'
-          # Rather than patch each file as new ones surface, disable the
-          # entire focaltech_touch_mi driver directory at the parent
-          # Makefile level — unrelated to binfmt_misc/the kernel image
-          # goal, and this device likely doesn't need this specific
-          # Xiaomi touch panel driver anyway.
           DRIVER_DIR=$(find drivers/input/touchscreen -maxdepth 2 -type d -iname "focaltech_touch_mi" | head -n1)
 
           if [ -z "$DRIVER_DIR" ]; then
@@ -103,20 +91,12 @@ jobs:
       - name: Verify NVT touch panel driver is present (actual hardware on this device)
         run: |
           cd kernel
-          # Poco F1 / Beryllium shipped with two touch panel vendors
-          # across production batches — FocalTech FT8719 (disabled above,
-          # not present on this device) and Novatek (NVT) NT36672A, which
-          # is what's actually on this device. Confirming the NVT driver
-          # exists and wasn't touched by the FocalTech disable step above.
           NVT_FILES=$(find drivers/input/touchscreen -iname "*nvt*" -o -iname "*novatek*" 2>/dev/null)
           if [ -n "$NVT_FILES" ]; then
             echo "NVT/Novatek touch driver files found:"
             echo "$NVT_FILES"
           else
             echo "WARNING: no NVT/Novatek touch driver files found in this tree."
-            echo "If your device uses the NVT touch panel, the flashed kernel"
-            echo "will not have a working touchscreen driver for it. Check"
-            echo "whether it's under a different naming convention:"
             find drivers/input/touchscreen -maxdepth 2 -type d
           fi
 
@@ -137,17 +117,10 @@ jobs:
       - name: Verify clang version
         run: |
           clang --version || true
-          # ld.lld is required for cross-linking arm64 with LLVM=1 — the
-          # host's default GNU ld only knows x86 emulations and fails with
-          # "unrecognised emulation mode: aarch64linux" otherwise.
           ld.lld --version || echo "WARNING: ld.lld not found in this toolchain archive — cross-linking arm64 will fail"
 
       - name: Apply stored device config
         run: |
-          # Placed in out/ (not the source root) — Kbuild's out-of-tree
-          # build (O=out) treats any build-artifact-like file sitting in
-          # the source root, including .config, as a "dirty" source tree
-          # and refuses to proceed. out/.config is the correct location.
           mkdir -p kernel/out
           cp workflow-repo/.github/workflows/configs/kernel.config kernel/out/.config
 
@@ -281,8 +254,6 @@ jobs:
             CONFIG_CHECKPOINT_RESTORE \
             CONFIG_DEVTMPFS_MOUNT \
             CONFIG_VT \
-            CONFIG_VT_CONSOLE \
-            CONFIG_KCMP \
             CONFIG_SQUASHFS \
             CONFIG_XZ_DEC \
             CONFIG_FANOTIFY \
@@ -294,12 +265,9 @@ jobs:
       - name: Check which symbols actually exist in this tree's Kconfig
         run: |
           cd kernel
-          for opt in UPROBES XZ_DEC CGROUP_PIDS \
-            CHECKPOINT_RESTORE EXT4_FS_POSIX_ACL UTS_NS \
-            NF_TABLES SECURITYFS VT VETH PID_NS NET_NSH \
-            BLK_CGROUP CGROUP_DEVICE MEMFD_CREATE FANOTIFY FHANDLE SYSVIPC \
-            SYSVIPC_SYSCTL DEVTMPFS DEVTMPFS_MOUNT \
-            BINFMT_MISC USER_NS SQUASHFS KPROBES ; do
+          for opt in UPROBES XZ_DEC CHECKPOINT_RESTORE \
+            SECURITYFS VT NET_NSH USER_NS \
+            BINFMT_MISC SQUASHFS KPROBES ; do
             if grep -rq "^config ${opt}\$" --include='Kconfig*' .; then
               echo "REAL   CONFIG_${opt}"
             else
