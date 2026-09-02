@@ -290,8 +290,22 @@ jobs:
           do
             ./scripts/config --file out/.config --enable "${opt#CONFIG_}"
           done
-          # Explicitly force the selftest OFF rather than leaving it
-          grep -E "CONFIG_BINFMT_MISC|CONFIG_USER_NS|CONFIG_NET_NSH|CONFIG_KPROBES|CONFIG_SQUASHFS|" out/.config
+
+      - name: Check which symbols actually exist in this tree's Kconfig
+        run: |
+          cd kernel
+          for opt in UPROBES XZ_DEC CGROUP_PIDS \
+            CHECKPOINT_RESTORE EXT4_FS_POSIX_ACL UTS_NS \
+            NF_TABLES SECURITYFS VT VETH PID_NS NET_NSH \
+            BLK_CGROUP CGROUP_DEVICE MEMFD_CREATE FANOTIFY FHANDLE SYSVIPC \
+            SYSVIPC_SYSCTL DEVTMPFS DEVTMPFS_MOUNT \
+            BINFMT_MISC USER_NS SQUASHFS KPROBES ; do
+            if grep -rq "^config ${opt}\$" --include='Kconfig*' .; then
+              echo "REAL   CONFIG_${opt}"
+            else
+              echo "GHOST  CONFIG_${opt}  <- no Kconfig entry in this tree, enabling it does nothing"
+            fi
+          done
 
       - name: Reconcile config (olddefconfig)
         run: |
@@ -363,7 +377,7 @@ jobs:
           cd AK3
           zip -r9 "../beryllium_419-fast_charge_smb2cpatch-${KERNEL_COMMIT}.zip" . -x ".git*"
           cd ..
-          ls -la "Xun-mainline-${KERNEL_COMMIT}.zip"
+          ls -la "beryllium_419-fast_charge_smb2cpatch-${KERNEL_COMMIT}.zip"
 
       - name: Upload flashable AK3 zip
         uses: actions/upload-artifact@v4
