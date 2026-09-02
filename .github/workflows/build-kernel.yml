@@ -248,7 +248,7 @@ jobs:
           grep -E "CONFIG_BINFMT_MISC|CONFIG_USER_NS|CONFIG_NET_NSH|CONFIG_KPROBES| CONFIG_CHECKPOINT_RESTORECONFIG_DEVTMPFS_MOUNT|CONFIG_VT|CONFIG_SQUASHFS|CONFIG_XZ_DEC|CONFIG_FANOTIFY|CONFIG_SECURITYFS|CONFIG_KCMP" out/.config
           echo ""
           echo "--- NetHunter-critical subset (chroot/container/KeX depend on these) ---"
-          for opt in USER_NS PID_NS UTS_NS BINFMT_MISC ; do
+          for opt in BINFMT_MISC USER_NS NET_NSH KPROBES CHECKPOINT_RESTORE DEVTMPFS_MOUNT VT SQUASHFS XZ_DEC FANOTIFY SECURITYFS KCMP ; do
             line=$(grep "^CONFIG_${opt}=" out/.config || true)
             if [ -n "$line" ]; then
               echo "OK    $line"
