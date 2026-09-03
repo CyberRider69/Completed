@@ -500,7 +500,7 @@ jobs:
 
           echo ""
           echo "--- NetHunter-critical subset (chroot/container/KeX depend on these) ---"
-          for opt in USER_NS PID_NS UTS_NS BINFMT_MISC ; do
+          for opt in USER_NS KROPBES CHECKPOINT_RESTORE DEVTMPFS_MOUNT VT SQUASHFS XZ_DEC FANOTIFY SECURITYFS KCMP BINFMT_MISC ; do
             line=$(grep "^CONFIG_${opt}=" out/.config || true)
             if [ -n "$line" ]; then
               echo "OK    $line"
@@ -514,8 +514,8 @@ jobs:
           cd kernel
           # This step is now the actual point of the workflow
           set +e
-          make ARCH=${ARCH} O=out CC=clang LLVM=1 LLVM_IAS=1 -j"$(nproc)" > ../build.log 2>&1
-          STATUS=$?
+          make ARCH=${ARCH} O=out CC=clang LLVM=1 LLVM_IAS=1 -j"$(nproc)" 2>&1 | tee ../build.log
+          STATUS=${PIPESTATUS[0]}
           set -e
           if [ $STATUS -ne 0 ]; then
             echo "Kernel build not finished."
@@ -523,6 +523,13 @@ jobs:
           fi
           echo "Kernel build finished."
 
+      - name: Upload build log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-log-${{ env.KERNEL_COMMIT }}
+          path: build.log
+          
       - name: Fetch AK3 template
         run: |
           pip install gdown
