@@ -22,18 +22,28 @@ jobs:
         run: |
           git clone --branch "${KERNEL_BRANCH}" "${KERNEL_REPO}" kernel
           cd kernel
+          # "g2819f2a0v4d" from `uname -r` is git-describe style output
+          # (g<abbrev-hash>), not a valid ref on its own — resolve it to
+          # a real commit first. The abbreviated hash is the part right
+          # after "g"; trailing characters may be a dirty/build suffix
+          # rather than part of the hash, so try progressively shorter
+          # prefixes until one resolves.
+          RAW="2819f2a0v4d"
           MATCH=""
-          for CANDIDATE in "54cd93e4b"; do
+          for LEN in 12 10 8 7; do
+            CANDIDATE="${RAW:0:$LEN}"
             if git rev-parse --verify --quiet "${CANDIDATE}^{commit}" > /dev/null; then
               MATCH="${CANDIDATE}"
               break
             fi
           done
-          if [ -n "${MATCH}" ]; then
+          if [ -z "${MATCH}" ]; then
+            echo "Could not resolve g2819f2a0v4d to a commit on branch ${KERNEL_BRANCH}."
+            echo "Falling back to branch tip — verify this manually before trusting the .ko:"
+            git log -5 --oneline
+          else
             git checkout "${MATCH}"
             echo "Pinned to commit: $(git rev-parse HEAD)"
-          else
-            echo "Candidate commit not found, staying on branch ${KERNEL_BRANCH}"
           fi
           echo "KERNEL_COMMIT=$(git rev-parse HEAD)" >> "$GITHUB_ENV"
           
@@ -207,6 +217,14 @@ jobs:
         run: |
           cd kernel
           # All =y, built directly into the kernel image
+          # CFI_CLANG and KPROBES are mutually exclusive on this tree's
+          # Kconfig (kprobes' runtime instruction patching conflicts with
+          # clang CFI's control-flow checks). Without disabling CFI first,
+          # olddefconfig silently reverts KPROBES back to 'n' later even
+          # though we --enable it below.
+          ./scripts/config --file out/.config --disable CFI_CLANG
+          ./scripts/config --file out/.config --disable CFI
+
           for opt in \
             CONFIG_BINFMT_MISC \
             CONFIG_USER_NS \
@@ -492,9 +510,25 @@ jobs:
         run: |
           cd kernel
           # This step is now the actual point of the workflow
+          #
+          # NOTE: previously piped through `tee`, which gave every parallel
+          # compiler job a shared pipe to write into. When make kills
+          # in-flight jobs after the first fatal error, that shared-pipe
+          # setup can produce spurious "LLVM ERROR: IO failure on output
+          # stream: Broken pipe" noise. Writing straight to a real file
+          # avoids the whole class of problem (EPIPE can't happen on a
+          # normal file write), and `tail -f` gives live console output
+          # without a live process ever writing into a pipe.
           set +e
-          make ARCH=${ARCH} O=out CC=clang LLVM=1 LLVM_IAS=1 --output-sync=target -j"$(nproc)" 2>&1 | tee ../build.log
-          STATUS=${PIPESTATUS[0]}
+          make ARCH=${ARCH} O=out CC=clang LLVM=1 LLVM_IAS=1 --output-sync=target -j"$(nproc)" > ../build.log 2>&1 &
+          BUILD_PID=$!
+          tail -n +1 -f ../build.log --pid=$BUILD_PID &
+          TAIL_PID=$!
+          wait $BUILD_PID
+          STATUS=$?
+          # give tail a moment to flush any trailing lines, then stop it
+          sleep 1
+          kill $TAIL_PID 2>/dev/null || true
           set -e
           if [ $STATUS -ne 0 ]; then
             echo "Kernel build not finished."
