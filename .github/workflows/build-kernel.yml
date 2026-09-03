@@ -283,6 +283,7 @@ jobs:
           #include <linux/uaccess.h>
           #include <linux/sched.h>
           #include <uapi/linux/openat2.h>
+          #include "internal.h"
 
           static long do_sys_openat2_backport(int dfd, const char __user *filename,
           				     struct open_how *how)
