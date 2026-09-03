@@ -474,9 +474,9 @@ jobs:
       - name: Check which symbols actually exist in this tree's Kconfig
         run: |
           cd kernel
-          for opt in KPROBES XZ_DEC CHECKPOINT_RESTORE \
+          for opt in UPROBES XZ_DEC CHECKPOINT_RESTORE \
             SECURITYFS VT NET_NSH DEVTMPFS_MOUNT USER_NS \
-            BINFMT_MISC SQUASHFS KCMP ; do
+            BINFMT_MISC SQUASHFS KPROBES KCMP ; do
             if grep -rq "^config ${opt}\$" --include='Kconfig*' .; then
               echo "REAL   CONFIG_${opt}"
             else
@@ -497,7 +497,7 @@ jobs:
 
           echo ""
           echo "--- NetHunter-critical subset (chroot/container/KeX depend on these) ---"
-          for opt in USER_NS KROPBES CHECKPOINT_RESTORE DEVTMPFS_MOUNT VT SQUASHFS XZ_DEC FANOTIFY SECURITYFS KCMP BINFMT_MISC ; do
+          for opt in USER_NS KPROBES CHECKPOINT_RESTORE DEVTMPFS_MOUNT VT SQUASHFS XZ_DEC FANOTIFY SECURITYFS KCMP BINFMT_MISC ; do
             line=$(grep "^CONFIG_${opt}=" out/.config || true)
             if [ -n "$line" ]; then
               echo "OK    $line"
@@ -511,24 +511,18 @@ jobs:
           cd kernel
           # This step is now the actual point of the workflow
           #
-          # NOTE: previously piped through `tee`, which gave every parallel
-          # compiler job a shared pipe to write into. When make kills
-          # in-flight jobs after the first fatal error, that shared-pipe
-          # setup can produce spurious "LLVM ERROR: IO failure on output
-          # stream: Broken pipe" noise. Writing straight to a real file
-          # avoids the whole class of problem (EPIPE can't happen on a
-          # normal file write), and `tail -f` gives live console output
-          # without a live process ever writing into a pipe.
+          # NOTE on "LLVM ERROR: IO failure on output stream: Broken pipe":
+          # this can appear when make kills in-flight parallel jobs right
+          # after the first fatal compile error — those jobs were still
+          # mid-write into the tee pipe when it got torn down. It's cosmetic
+          # noise from the abort, not a second real failure; the actual
+          # cause is always the compile error printed above it. Tried
+          # routing through a file + background `tail -f` instead of `tee`
+          # to avoid this, but that broke live console streaming, which
+          # matters more for debugging than suppressing this cosmetic line.
           set +e
-          make ARCH=${ARCH} O=out CC=clang LLVM=1 LLVM_IAS=1 --output-sync=target -j"$(nproc)" > ../build.log 2>&1 &
-          BUILD_PID=$!
-          tail -n +1 -f ../build.log --pid=$BUILD_PID &
-          TAIL_PID=$!
-          wait $BUILD_PID
-          STATUS=$?
-          # give tail a moment to flush any trailing lines, then stop it
-          sleep 1
-          kill $TAIL_PID 2>/dev/null || true
+          make ARCH=${ARCH} O=out CC=clang LLVM=1 LLVM_IAS=1 --output-sync=target -j"$(nproc)" 2>&1 | tee ../build.log
+          STATUS=${PIPESTATUS[0]}
           set -e
           if [ $STATUS -ne 0 ]; then
             echo "Kernel build not finished."
