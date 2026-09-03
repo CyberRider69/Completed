@@ -474,9 +474,9 @@ jobs:
       - name: Check which symbols actually exist in this tree's Kconfig
         run: |
           cd kernel
-          for opt in UPROBES XZ_DEC CHECKPOINT_RESTORE \
+          for opt in KPROBES XZ_DEC CHECKPOINT_RESTORE \
             SECURITYFS VT NET_NSH DEVTMPFS_MOUNT USER_NS \
-            BINFMT_MISC SQUASHFS KPROBES KCMP ; do
+            BINFMT_MISC SQUASHFS KCMP ; do
             if grep -rq "^config ${opt}\$" --include='Kconfig*' .; then
               echo "REAL   CONFIG_${opt}"
             else
