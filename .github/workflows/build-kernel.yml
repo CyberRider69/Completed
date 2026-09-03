@@ -22,28 +22,18 @@ jobs:
         run: |
           git clone --branch "${KERNEL_BRANCH}" "${KERNEL_REPO}" kernel
           cd kernel
-          # "g2819f2a0v4d" from `uname -r` is git-describe style output
-          # (g<abbrev-hash>), not a valid ref on its own — resolve it to
-          # a real commit first. The abbreviated hash is the part right
-          # after "g"; trailing characters may be a dirty/build suffix
-          # rather than part of the hash, so try progressively shorter
-          # prefixes until one resolves.
-          RAW="2819f2a0v4d"
           MATCH=""
-          for LEN in 12 10 8 7; do
-            CANDIDATE="${RAW:0:$LEN}"
+          for CANDIDATE in "54cd93e4b"; do
             if git rev-parse --verify --quiet "${CANDIDATE}^{commit}" > /dev/null; then
               MATCH="${CANDIDATE}"
               break
             fi
           done
-          if [ -z "${MATCH}" ]; then
-            echo "Could not resolve g2819f2a0v4d to a commit on branch ${KERNEL_BRANCH}."
-            echo "Falling back to branch tip — verify this manually before trusting the .ko:"
-            git log -5 --oneline
-          else
+          if [ -n "${MATCH}" ]; then
             git checkout "${MATCH}"
             echo "Pinned to commit: $(git rev-parse HEAD)"
+          else
+            echo "Candidate commit not found, staying on branch ${KERNEL_BRANCH}"
           fi
           echo "KERNEL_COMMIT=$(git rev-parse HEAD)" >> "$GITHUB_ENV"
           
@@ -273,48 +263,26 @@ jobs:
           #    this backport handles as a normal open().
           cat > fs/openat2_backport.c << 'SRCEOF'
           // SPDX-License-Identifier: GPL-2.0
-          /* Minimal openat2(2) backport for kernels predating 5.6. */
+          /* Minimal openat2(2) backport for kernels predating 5.6.
+           *
+           * build_open_flags()/do_filp_open() are static/internal-linkage in
+           * this tree's fs/open.c, so they cannot be called from here even
+           * with fs/internal.h included. Instead this reuses do_sys_open(),
+           * the older single-function open path (still present and declared
+           * in fs/internal.h on kernels pre-dating the 5.6 openat2 refactor)
+           * which does flag-building + path lookup + fd install internally.
+           * Since this backport unconditionally rejects any RESOLVE_* flag,
+           * we never need the lower-level split — do_sys_open() covers every
+           * case this backport actually accepts.
+           */
           #include <linux/kernel.h>
           #include <linux/fs.h>
           #include <linux/file.h>
-          #include <linux/namei.h>
           #include <linux/syscalls.h>
-          #include <linux/fsnotify.h>
           #include <linux/uaccess.h>
           #include <linux/sched.h>
           #include <uapi/linux/openat2.h>
           #include "internal.h"
-
-          static long do_sys_openat2_backport(int dfd, const char __user *filename,
-          				     struct open_how *how)
-          {
-          	struct open_flags op;
-          	struct filename *tmp;
-          	int fd;
-
-          	fd = build_open_flags((int)how->flags, (umode_t)how->mode, &op);
-          	if (fd)
-          		return fd;
-
-          	tmp = getname(filename);
-          	if (IS_ERR(tmp))
-          		return PTR_ERR(tmp);
-
-          	fd = get_unused_fd_flags((int)how->flags);
-          	if (fd >= 0) {
-          		struct file *f = do_filp_open(dfd, tmp, &op);
-
-          		if (IS_ERR(f)) {
-          			put_unused_fd(fd);
-          			fd = PTR_ERR(f);
-          		} else {
-          			fsnotify_open(f);
-          			fd_install(fd, f);
-          		}
-          	}
-          	putname(tmp);
-          	return fd;
-          }
 
           SYSCALL_DEFINE4(openat2, int, dfd, const char __user *, filename,
           		 struct open_how __user *, how, size_t, usize)
@@ -349,7 +317,7 @@ jobs:
           	if (tmp.resolve != 0)
           		return -EINVAL;
 
-          	return do_sys_openat2_backport(dfd, filename, &tmp);
+          	return do_sys_open(dfd, filename, (int)tmp.flags, (umode_t)tmp.mode);
           }
           SRCEOF
 
@@ -525,7 +493,7 @@ jobs:
           cd kernel
           # This step is now the actual point of the workflow
           set +e
-          make ARCH=${ARCH} O=out CC=clang LLVM=1 LLVM_IAS=1 -j"$(nproc)" 2>&1 | tee ../build.log
+          make ARCH=${ARCH} O=out CC=clang LLVM=1 LLVM_IAS=1 --output-sync=target -j"$(nproc)" 2>&1 | tee ../build.log
           STATUS=${PIPESTATUS[0]}
           set -e
           if [ $STATUS -ne 0 ]; then
