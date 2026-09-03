@@ -477,7 +477,7 @@ jobs:
           for opt in UPROBES XZ_DEC CHECKPOINT_RESTORE \
             SECURITYFS VT NET_NSH DEVTMPFS_MOUNT USER_NS \
             BINFMT_MISC SQUASHFS KPROBES KCMP ; do
-            if grep -rq "^config ${opt}\$" --include='Kconfig*' .; then
+            if grep -rqE "^(menu)?config ${opt}\$" --include='Kconfig*' .; then
               echo "REAL   CONFIG_${opt}"
             else
               echo "GHOST  CONFIG_${opt}  <- no Kconfig entry in this tree, enabling it does nothing"
